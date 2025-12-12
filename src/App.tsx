@@ -4,7 +4,7 @@ import { MobileControls } from './components/MobileControls';
 import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput } from './types';
 import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
 import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff } from 'lucide-react';
+import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff, Activity } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // Explicit STUN config for better mobile/network compatibility
@@ -225,6 +225,10 @@ const App: React.FC = () => {
   const [isLagging, setIsLagging] = useState(false);
   const lastPacketTimeRef = useRef<number>(0);
   const gameStartedRef = useRef<boolean>(false); // NEW: Prevents premature state updates
+  
+  // DIAGNOSTICS
+  const packetCountRef = useRef<number>(0);
+  const [lastError, setLastError] = useState<string>("");
 
   // Networking Refs
   const peerRef = useRef<Peer | null>(null);
@@ -358,6 +362,8 @@ const App: React.FC = () => {
     setLatency(null);
     setIsLagging(false);
     gameStartedRef.current = false;
+    packetCountRef.current = 0;
+    setLastError("");
     
     const id = generateRoomId();
     setRoomId(id);
@@ -373,6 +379,7 @@ const App: React.FC = () => {
     peer.on('error', (err) => {
         if (peer !== peerRef.current) return;
         console.error("Host Peer Error:", err);
+        setLastError(`HostErr: ${err.type}`);
         setJoinError("创建房间失败");
         window.alert(`创建失败: ${err.type}`);
         setGameState(prev => ({...prev, phase: GamePhase.MENU}));
@@ -410,6 +417,7 @@ const App: React.FC = () => {
       });
       conn.on('error', (err) => {
           console.error("Connection error", err);
+          setLastError(`ConnErr: ${err.type}`);
       });
     });
 
@@ -435,6 +443,7 @@ const App: React.FC = () => {
     peer.on('error', (err: any) => {
         if (peer !== peerRef.current) return;
         console.error("Peer Error:", err);
+        setLastError(`ClientPeerErr: ${err.type}`);
         setIsConnecting(false);
         if (err.type === 'peer-unavailable') {
             setJoinError("房间号不存在或主机未连接");
@@ -474,6 +483,8 @@ const App: React.FC = () => {
         lastPacketTimeRef.current = Date.now();
         setIsLagging(false);
         gameStartedRef.current = false; // Reset start flag
+        packetCountRef.current = 0;
+        setLastError("");
         
         setMyRole(EntityType.DEMON); 
         
@@ -483,42 +494,48 @@ const App: React.FC = () => {
       });
 
       conn.on('data', (data: any) => {
-        // Any data received means connection is alive
-        lastPacketTimeRef.current = Date.now();
-        if (isLagging) setIsLagging(false);
+        try {
+            // Any data received means connection is alive
+            lastPacketTimeRef.current = Date.now();
+            if (isLagging) setIsLagging(false);
+            packetCountRef.current += 1;
 
-        if (data.type === 'LOBBY_UPDATE') {
-            setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
-        } else if (data.type === 'START_GAME') {
-             // Mark game as started immediately
-             gameStartedRef.current = true;
-             
-             if (data.clientRole) {
-                 setMyRole(data.clientRole);
-             }
-             if (data.initialState) {
-                 setGameState(data.initialState);
-                 lastTimeRef.current = 0; 
-             }
-        } else if (data.type === 'STATE_UPDATE') {
-            // CRITICAL: Ignore state updates if game hasn't officially started (prevents race conditions)
-            if (!gameStartedRef.current) return;
+            if (data.type === 'LOBBY_UPDATE') {
+                setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
+            } else if (data.type === 'START_GAME') {
+                // Mark game as started immediately
+                gameStartedRef.current = true;
+                
+                if (data.clientRole) {
+                    setMyRole(data.clientRole);
+                }
+                if (data.initialState) {
+                    setGameState(data.initialState);
+                    lastTimeRef.current = 0; 
+                }
+            } else if (data.type === 'STATE_UPDATE') {
+                // CRITICAL: Ignore state updates if game hasn't officially started (prevents race conditions)
+                if (!gameStartedRef.current) return;
 
-            setGameState(prev => {
-                const newState = {
-                    ...prev,
-                    ...data.state,
-                    // Keep existing static entities if not provided in update
-                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
-                    cabin: data.state.cabin ? data.state.cabin : prev.cabin,
-                };
-                return newState;
-            });
-        } else if (data.type === 'PING') {
-            try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
-        } else if (data.type === 'PONG') {
-            const rtt = Date.now() - data.timestamp;
-            setLatency(rtt);
+                setGameState(prev => {
+                    const newState = {
+                        ...prev,
+                        ...data.state,
+                        // Keep existing static entities if not provided in update
+                        trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
+                        cabin: data.state.cabin ? data.state.cabin : prev.cabin,
+                    };
+                    return newState;
+                });
+            } else if (data.type === 'PING') {
+                try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
+            } else if (data.type === 'PONG') {
+                const rtt = Date.now() - data.timestamp;
+                setLatency(rtt);
+            }
+        } catch (err: any) {
+            console.error("Packet Process Error", err);
+            setLastError(`PktErr: ${err.message}`);
         }
       });
       
@@ -526,12 +543,14 @@ const App: React.FC = () => {
           clearTimeout(timeout);
           window.alert("Host disconnected");
           gameStartedRef.current = false;
+          setLastError("Host Disconnected");
           setGameState(prev => ({...prev, phase: GamePhase.MENU}));
       });
       
       conn.on('error', (err) => {
           clearTimeout(timeout);
           console.error("Conn Error", err);
+          setLastError(`ConnErr: ${err.type}`);
           setJoinError("连接断开");
           setIsConnecting(false);
       });
@@ -712,6 +731,8 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current!);
   }, [gameMode, myRole, opponentMode]); 
 
+  // ... (Rest of UI components renderRules, renderMenu, renderLobby, and main Render remain largely same but preserved in full output below)
+  
   const handleCopy = () => {
     navigator.clipboard.writeText(roomId);
     setIsCopied(true);
@@ -771,8 +792,6 @@ const App: React.FC = () => {
       </div>
   );
 
-  // ... (Rest of UI components renderRules, renderMenu, renderLobby, and main Render remain largely same but preserved in full output below)
-  
   const renderRules = () => (
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
@@ -1058,6 +1077,37 @@ const App: React.FC = () => {
              inputRef={inputRef} 
              onExit={gameMode === GameMode.SINGLE_PLAYER ? () => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY })) : undefined}
          />
+      )}
+
+      {/* DIAGNOSTIC OVERLAY for ONLINE CLIENT */}
+      {gameMode === GameMode.ONLINE_CLIENT && gameState.phase === GamePhase.PLAYING && (
+          <div className="absolute top-16 right-4 z-50 bg-black/60 p-2 rounded text-[10px] font-mono border border-stone-600 flex flex-col gap-1 w-32 backdrop-blur-sm pointer-events-none">
+             <div className="flex justify-between border-b border-stone-600 pb-1 mb-1">
+                 <span className="font-bold text-blue-400">DEBUG</span>
+                 <span>{roomId}</span>
+             </div>
+             <div className="flex justify-between">
+                 <span>Packets:</span>
+                 <span className="text-green-400">{packetCountRef.current}</span>
+             </div>
+             <div className="flex justify-between">
+                 <span>Latency:</span>
+                 <span className={latency && latency > 200 ? "text-red-500" : "text-stone-300"}>{latency ?? '-'}ms</span>
+             </div>
+             <div className="flex justify-between">
+                 <span>Trees:</span>
+                 <span className={gameState.trees.length === 0 ? "text-red-500 font-bold" : "text-stone-300"}>{gameState.trees.length}</span>
+             </div>
+             <div className="flex justify-between">
+                 <span>Ents:</span>
+                 <span className="text-stone-300">{gameState.deers.length + gameState.mushrooms.length + (gameState.cabin ? 1 : 0)}</span>
+             </div>
+             {lastError && (
+                 <div className="mt-1 pt-1 border-t border-red-900 text-red-400 break-words leading-tight">
+                     ! {lastError.substring(0, 40)}
+                 </div>
+             )}
+          </div>
       )}
 
       {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
