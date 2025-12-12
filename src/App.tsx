@@ -4,8 +4,19 @@ import { MobileControls } from './components/MobileControls';
 import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput } from './types';
 import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
 import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal } from 'lucide-react';
+import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
+
+// Explicit STUN config for better mobile/network compatibility
+const PEER_CONFIG = {
+    debug: 1,
+    config: {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+    }
+};
 
 // --- Initial State Factory ---
 const createInitialState = (): GameState => {
@@ -168,7 +179,15 @@ const createInitialState = (): GameState => {
   };
 };
 
-const generateRoomId = () => Math.random().toString(36).substring(2, 8).toUpperCase();
+const generateRoomId = () => {
+    // Generate a robust 6-char ID
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No I, 1, O, 0 for clarity
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+};
 
 // Opponent Mode for Lobby State
 type OpponentMode = 'WAITING' | 'COMPUTER' | 'CONNECTED';
@@ -184,12 +203,17 @@ const App: React.FC = () => {
   const [showRules, setShowRules] = useState(false);
   const [showJoinPanel, setShowJoinPanel] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   
   // New Role & Opponent State
   const [myRole, setMyRole] = useState<EntityType>(EntityType.HUNTER);
   const [opponentMode, setOpponentMode] = useState<OpponentMode>('WAITING');
   const [joinError, setJoinError] = useState<string>("");
   const [latency, setLatency] = useState<number | null>(null);
+  
+  // Network Health
+  const [isLagging, setIsLagging] = useState(false);
+  const lastPacketTimeRef = useRef<number>(0);
 
   // Networking Refs
   const peerRef = useRef<Peer | null>(null);
@@ -247,8 +271,10 @@ const App: React.FC = () => {
     if ((gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT) && opponentMode === 'CONNECTED') {
         pingIntervalRef.current = window.setInterval(() => {
             if (connRef.current && connRef.current.open) {
-                const pingMsg = { type: 'PING', timestamp: Date.now() };
-                connRef.current.send(pingMsg);
+                try {
+                    const pingMsg = { type: 'PING', timestamp: Date.now() };
+                    connRef.current.send(pingMsg);
+                } catch (e) { /* ignore */ }
             }
         }, 1000);
     } else {
@@ -257,6 +283,7 @@ const App: React.FC = () => {
             pingIntervalRef.current = null;
         }
         setLatency(null);
+        setIsLagging(false);
     }
     return () => {
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
@@ -307,7 +334,6 @@ const App: React.FC = () => {
 
   // --- Network Logic ---
   const initializeHost = () => {
-    // Aggressive cleanup
     if (peerRef.current) {
         peerRef.current.destroy();
         peerRef.current = null;
@@ -317,12 +343,13 @@ const App: React.FC = () => {
         connRef.current = null;
     }
 
-    setOpponentMode('WAITING'); // Ensure fresh state
+    setOpponentMode('WAITING');
     setLatency(null);
+    setIsLagging(false);
     
     const id = generateRoomId();
     setRoomId(id);
-    const peer = new Peer(id, { debug: 1 });
+    const peer = new Peer(id, PEER_CONFIG);
     
     peer.on('open', (id) => {
       if (peer !== peerRef.current) return;
@@ -346,12 +373,14 @@ const App: React.FC = () => {
         if (peer !== peerRef.current) return;
         setOpponentMode('CONNECTED');
         connRef.current = conn;
+        lastPacketTimeRef.current = Date.now();
         // Host immediately sends LOBBY_UPDATE upon connection to sync roles
         try {
             conn.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
         } catch(e) { console.error("Failed to send lobby update", e); }
       });
       conn.on('data', (data: any) => {
+        lastPacketTimeRef.current = Date.now();
         if (data.type === 'INPUT_UPDATE') {
           remoteInputRef.current = data.input;
         } else if (data.type === 'PONG') {
@@ -381,36 +410,57 @@ const App: React.FC = () => {
         return;
     }
     
+    setIsConnecting(true);
+
     if (peerRef.current) {
         peerRef.current.destroy();
     }
 
-    const peer = new Peer(generateRoomId(), { debug: 1 });
+    // Generate random Client ID
+    const peer = new Peer(generateRoomId(), PEER_CONFIG);
     
     peer.on('error', (err: any) => {
         if (peer !== peerRef.current) return;
         console.error("Peer Error:", err);
+        setIsConnecting(false);
         if (err.type === 'peer-unavailable') {
             setJoinError("房间号不存在或主机未连接");
+        } else if (err.type === 'unavailable-id') {
+            // Retry with new ID if collision (rare)
+            setTimeout(joinGame, 100);
         } else {
-            setJoinError("连接错误，请检查网络或房间号");
+            setJoinError(`连接错误 (${err.type})`);
         }
     });
 
     peer.on('open', (id) => {
       if (peer !== peerRef.current) return;
-      const conn = peer.connect(joinId.trim().toUpperCase());
       
+      const conn = peer.connect(joinId.trim().toUpperCase(), { reliable: true });
+      
+      // Connection Timeout Fallback (10s)
+      const timeout = setTimeout(() => {
+          if (peerRef.current === peer && opponentMode !== 'CONNECTED') {
+              setJoinError("连接超时，请检查网络或重试");
+              setIsConnecting(false);
+              conn.close();
+          }
+      }, 10000);
+
       conn.on('open', () => {
+        clearTimeout(timeout);
         if (peer !== peerRef.current) return;
+        
         console.log("Connected to: " + joinId);
         setJoinError(""); 
+        setIsConnecting(false);
         setShowJoinPanel(false); 
         setRoomId(joinId);
         setGameMode(GameMode.ONLINE_CLIENT);
         isHostRef.current = false;
+        lastPacketTimeRef.current = Date.now();
+        setIsLagging(false);
         
-        // Initial assumption, will be corrected by LOBBY_UPDATE
         setMyRole(EntityType.DEMON); 
         
         setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }));
@@ -419,11 +469,13 @@ const App: React.FC = () => {
       });
 
       conn.on('data', (data: any) => {
+        // Any data received means connection is alive
+        lastPacketTimeRef.current = Date.now();
+        if (isLagging) setIsLagging(false);
+
         if (data.type === 'LOBBY_UPDATE') {
             setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
         } else if (data.type === 'START_GAME') {
-             // CRITICAL: CLIENT REPLACES ENTIRE STATE ON START
-             // This ensures map (trees/cabin) is identical to host
              if (data.clientRole) {
                  setMyRole(data.clientRole);
              }
@@ -432,26 +484,17 @@ const App: React.FC = () => {
                  lastTimeRef.current = 0; 
              }
         } else if (data.type === 'STATE_UPDATE') {
-            // CLIENT STATE RECONCILIATION
-            // Merge dynamic data from Host with local static data (trees/cabin)
-            // This prevents "flicker" or missing objects if host optimizes packet size
             setGameState(prev => {
-                // If phase is different (e.g. GAME_OVER), respect the host's phase
-                // But generally we are in PLAYING.
-                
-                // If the incoming state is partial (optimized), we retain our trees/cabin
                 const newState = {
                     ...prev,
                     ...data.state,
-                    // IMPORTANT: Ensure static obstacles are preserved from the START_GAME state
-                    // if the host sends them as empty/undefined in updates.
                     trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
                     cabin: data.state.cabin ? data.state.cabin : prev.cabin,
                 };
                 return newState;
             });
         } else if (data.type === 'PING') {
-            conn.send({ type: 'PONG', timestamp: data.timestamp });
+            try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
         } else if (data.type === 'PONG') {
             const rtt = Date.now() - data.timestamp;
             setLatency(rtt);
@@ -459,8 +502,16 @@ const App: React.FC = () => {
       });
       
       conn.on('close', () => {
+          clearTimeout(timeout);
           window.alert("Host disconnected");
           setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+      });
+      
+      conn.on('error', (err) => {
+          clearTimeout(timeout);
+          console.error("Conn Error", err);
+          setJoinError("连接断开");
+          setIsConnecting(false);
       });
     });
 
@@ -468,10 +519,8 @@ const App: React.FC = () => {
   };
 
   const startGame = () => {
-    // 1. Client cannot start
     if (gameMode === GameMode.ONLINE_CLIENT) return;
 
-    // 2. Host STRICT check
     if (gameMode === GameMode.ONLINE_HOST) {
         if (!connRef.current || opponentMode !== 'CONNECTED') {
             console.warn("Attempted to start game without valid connection");
@@ -479,11 +528,9 @@ const App: React.FC = () => {
         }
     }
 
-    // Create new state (Host is authoritative on map generation)
     const newState = createInitialState();
     const obstacles = [...newState.trees, newState.cabin];
 
-    // Spawn Demon Logic (Randomly, away from Hunter)
     let attempts = 0;
     let valid = false;
     let spawnPos = { x: 100, y: 100 };
@@ -504,11 +551,9 @@ const App: React.FC = () => {
     newState.demon.pos = spawnPos;
     newState.phase = GamePhase.PLAYING;
 
-    // Send START_GAME with FULL initial state to client
     if (connRef.current && isHostRef.current) {
         const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
         try {
-            // Must Deep Clone to ensure clean JSON serialization
             const fullState = JSON.parse(JSON.stringify(newState));
             connRef.current.send({ 
                 type: 'START_GAME', 
@@ -524,17 +569,22 @@ const App: React.FC = () => {
     lastTimeRef.current = 0;
   };
 
-  // --- Game Loop ---
   const loop = (timestamp: number) => {
     if (!lastTimeRef.current) lastTimeRef.current = timestamp;
     const deltaTime = (timestamp - lastTimeRef.current) / 1000;
     lastTimeRef.current = timestamp;
     const safeDelta = Math.min(deltaTime, 0.1); 
 
-    // CLIENT MODE: PURE CLIENT
-    // Client does NOT run physics. Client only Sends Input and Renders (via state updates).
+    // CLIENT MODE
     if (gameMode === GameMode.ONLINE_CLIENT) {
-        // Throttle Input Sending (approx 30fps) to prevent clogging
+        // Lag Detection
+        if (opponentMode === 'CONNECTED') {
+            const timeSinceLastPacket = Date.now() - lastPacketTimeRef.current;
+            if (timeSinceLastPacket > 2500 && !isLagging) { // 2.5s tolerance
+                setIsLagging(true);
+            }
+        }
+
         inputTickRef.current += deltaTime;
         if (inputTickRef.current >= 0.033) { 
             if (connRef.current && connRef.current.open) {
@@ -547,21 +597,19 @@ const App: React.FC = () => {
                 };
                 try {
                     connRef.current.send({ type: 'INPUT_UPDATE', input: myInput });
-                } catch(e) { /* Ignore */ }
+                } catch(e) { /* Ignore send errors */ }
             }
             inputTickRef.current = 0;
         }
         
-        // Loop purely to keep RAF alive, but NO state updates here.
         requestRef.current = requestAnimationFrame(loop);
         return; 
     }
 
-    // HOST / SINGLE PLAYER MODE: AUTHORITATIVE
+    // HOST MODE Logic
     setGameState(prev => {
       if (prev.phase !== GamePhase.PLAYING) return prev;
 
-      // Prepare Inputs
       let hunterIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
       let demonIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
 
@@ -573,20 +621,16 @@ const App: React.FC = () => {
           action: inputRef.current.space || inputRef.current.enter
       };
 
-      // 1. Assign Local Input
       if (myRole === EntityType.HUNTER) {
           hunterIn = localInput;
       } else {
           demonIn = localInput;
       }
 
-      // 2. Assign Opponent Input
       if (gameMode === GameMode.ONLINE_HOST) {
-          // Use latest received input from Client
           if (myRole === EntityType.HUNTER) demonIn = remoteInputRef.current;
           else hunterIn = remoteInputRef.current;
       } else {
-          // Single Player / Bot
           if (opponentMode === 'COMPUTER') {
              const obstacles = [...prev.trees, prev.cabin];
              if (myRole === EntityType.HUNTER) {
@@ -597,7 +641,6 @@ const App: React.FC = () => {
           }
       }
 
-      // 3. Update Physics
       let nextState;
       try {
           nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
@@ -606,14 +649,11 @@ const App: React.FC = () => {
           return prev; 
       }
 
-      // 4. Host Broadcast (Throttled ~20 FPS)
       if (gameMode === GameMode.ONLINE_HOST && connRef.current) {
           networkTickRef.current += deltaTime;
           if (networkTickRef.current >= 0.05) { 
               try {
                   if (connRef.current.open) {
-                      // Optimization: Exclude heavy static data (Trees/Cabin)
-                      // Client already has them from START_GAME
                       const { trees, cabin, ...dynamicState } = nextState;
                       connRef.current.send({ type: 'STATE_UPDATE', state: dynamicState });
                   }
@@ -635,7 +675,6 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current!);
   }, [gameMode, myRole, opponentMode]); 
 
-  // --- UI Handlers ---
   const handleCopy = () => {
     navigator.clipboard.writeText(roomId);
     setIsCopied(true);
@@ -646,8 +685,9 @@ const App: React.FC = () => {
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-md w-full p-8 relative shadow-2xl flex flex-col items-center gap-6">
               <button 
-                  onClick={() => setShowJoinPanel(false)}
-                  className="absolute top-4 right-4 text-stone-400 hover:text-white"
+                  onClick={() => !isConnecting && setShowJoinPanel(false)}
+                  className="absolute top-4 right-4 text-stone-400 hover:text-white disabled:opacity-50"
+                  disabled={isConnecting}
               >
                   <X size={24} />
               </button>
@@ -661,14 +701,16 @@ const App: React.FC = () => {
                   <input 
                       type="text" 
                       placeholder="CODE" 
-                      className={`w-full bg-stone-900 border-2 rounded-lg p-4 text-center text-3xl font-mono tracking-widest text-white uppercase focus:outline-none focus:ring-2 transition-all
+                      className={`w-full bg-stone-900 border-2 rounded-lg p-4 text-center text-3xl font-mono tracking-widest text-white uppercase focus:outline-none focus:ring-2 transition-all disabled:opacity-50
                           ${joinError ? 'border-red-500 focus:ring-red-500/50' : 'border-stone-700 focus:border-blue-500 focus:ring-blue-500/50'}`}
                       onChange={(e) => {
-                          setJoinId(e.target.value.toUpperCase()); // Force Uppercase
+                          setJoinId(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')); // Sanitize
                           if(joinError) setJoinError("");
                       }}
                       value={joinId}
                       maxLength={6}
+                      disabled={isConnecting}
+                      autoCapitalize="characters"
                   />
                   {joinError && (
                       <span className="text-sm text-red-500 font-bold text-center animate-pulse flex items-center justify-center gap-1">
@@ -679,9 +721,14 @@ const App: React.FC = () => {
 
               <button 
                   onClick={joinGame}
-                  className="w-full py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold text-lg shadow-lg hover:shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+                  disabled={isConnecting}
+                  className={`w-full py-4 text-white rounded-lg font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-all
+                      ${isConnecting 
+                          ? 'bg-stone-600 cursor-not-allowed' 
+                          : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/20 active:scale-95'}`}
               >
-                  <ArrowRight size={20} /> 连接房间
+                  {isConnecting ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />} 
+                  {isConnecting ? "连接中..." : "连接房间"}
               </button>
           </div>
       </div>
@@ -739,7 +786,6 @@ const App: React.FC = () => {
       </div>
   );
 
-  // --- RENDER ---
   const renderMenu = () => (
     <div className="flex flex-col gap-4 items-center">
       <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
@@ -747,7 +793,6 @@ const App: React.FC = () => {
       <button 
         onClick={() => {
             setGameMode(GameMode.SINGLE_PLAYER);
-            // Default setup for single player
             setMyRole(EntityType.HUNTER);
             setOpponentMode('WAITING');
             setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
@@ -759,14 +804,12 @@ const App: React.FC = () => {
 
       <button 
         onClick={() => {
-            // Set GameMode IMMEDIATE to avoid button flicker in Lobby
             setGameMode(GameMode.ONLINE_HOST); 
-            // Set WAITING immediately to disable Start button
             setOpponentMode('WAITING');
             setLatency(null);
 
             initializeHost();
-            setMyRole(EntityType.HUNTER); // Default Host to Hunter
+            setMyRole(EntityType.HUNTER);
             setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
         }}
         className="w-64 py-4 bg-stone-800 text-stone-200 border border-stone-600 font-bold rounded hover:scale-105 transition flex items-center justify-center gap-2"
@@ -790,10 +833,8 @@ const App: React.FC = () => {
     const isGuest = gameMode === GameMode.ONLINE_CLIENT;
     const isOnline = gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT;
 
-    // Helper to render a player card
     const renderCard = (role: EntityType) => {
         const isMyRole = myRole === role;
-        // Determine status of this role
         let statusText = "空缺";
         let statusColor = "text-stone-500";
         let isCpu = false;
@@ -803,7 +844,6 @@ const App: React.FC = () => {
             statusText = "你 (Player 1)";
             statusColor = "text-green-400";
         } else {
-            // It's the other slot
             if (opponentMode === 'WAITING') {
                 statusText = gameMode === GameMode.SINGLE_PLAYER ? "点击添加电脑" : "等待加入...";
                 statusColor = "text-yellow-500";
@@ -821,8 +861,6 @@ const App: React.FC = () => {
         const canAddCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode !== 'COMPUTER';
         const canRemoveCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'COMPUTER';
         
-        // Host (or Single Player) can switch roles by clicking the OTHER card
-        // Guest can only view
         const canSwitchRole = (gameMode === GameMode.SINGLE_PLAYER || gameMode === GameMode.ONLINE_HOST) && !isMyRole;
 
         return (
@@ -834,7 +872,6 @@ const App: React.FC = () => {
                 onClick={() => {
                    if (canSwitchRole) {
                        setMyRole(role);
-                       // If Single Player, reset opponent mode if needed or keep it
                        if (gameMode === GameMode.SINGLE_PLAYER) {
                            setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
                        }
@@ -847,7 +884,6 @@ const App: React.FC = () => {
                 <h3 className="text-lg md:text-xl font-bold uppercase mb-2">{role === EntityType.HUNTER ? '猎人' : '恶魔'}</h3>
                 <span className={`text-xs md:text-sm font-bold ${statusColor}`}>{statusText}</span>
 
-                {/* Add/Remove CPU Button Overlay */}
                 {canAddCpu && (
                     <button 
                         className="mt-4 px-3 py-1 bg-stone-700 hover:bg-stone-600 rounded text-xs flex items-center gap-1 z-10"
@@ -887,7 +923,6 @@ const App: React.FC = () => {
                 <BookOpen size={20} /> <span className="hidden sm:inline">规则</span>
             </button>
 
-            {/* Room Info */}
             {gameMode === GameMode.ONLINE_HOST && (
                 <div className="mb-6 px-4 py-2 bg-neutral-900 rounded border border-neutral-600 flex items-center gap-4">
                     <span className="text-stone-400 text-xs md:text-sm">房间号</span>
@@ -898,22 +933,23 @@ const App: React.FC = () => {
                 </div>
             )}
             
-            {/* Latency Display */}
+            {/* Latency Display in Lobby */}
             {opponentMode === 'CONNECTED' && latency !== null && (
-                <div className="absolute top-4 left-4 md:top-8 md:left-8 flex items-center gap-2">
-                    <Signal size={18} className={latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
-                    <span className="text-stone-400 text-xs font-mono">{latency}ms</span>
+                <div className="absolute top-4 left-4 md:top-8 md:left-8 flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10">
+                    <Signal size={16} className={latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
+                    <div className="flex flex-col">
+                        <span className="text-stone-400 text-[10px] font-bold leading-none uppercase">Ping</span>
+                        <span className="text-stone-200 text-xs font-mono leading-none">{latency}ms</span>
+                    </div>
                 </div>
             )}
 
-            {/* Role Cards */}
             <div className="flex flex-row gap-4 md:gap-8 mb-8">
                 {renderCard(EntityType.HUNTER)}
                 <div className="hidden md:flex items-center text-stone-600 font-bold text-xl">VS</div>
                 {renderCard(EntityType.DEMON)}
             </div>
 
-            {/* Action Bar */}
             <div className="flex gap-4 w-full max-w-md">
                 <button 
                     onClick={() => {
@@ -928,7 +964,6 @@ const App: React.FC = () => {
                     返回
                 </button>
                 
-                {/* START BUTTON LOGIC SPLIT */}
                 {gameMode === GameMode.SINGLE_PLAYER ? (
                     <button 
                         onClick={startGame}
@@ -937,7 +972,6 @@ const App: React.FC = () => {
                         <Play size={18} /> 开始游戏
                     </button>
                 ) : (
-                    // ONLINE MODE BUTTONS
                     <button 
                         onClick={startGame}
                         disabled={isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED')}
@@ -972,7 +1006,6 @@ const App: React.FC = () => {
   };
 
   const cameraTarget = myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON';
-  
   const isPlaying = gameState.phase === GamePhase.PLAYING;
 
   return (
@@ -981,7 +1014,6 @@ const App: React.FC = () => {
       {showRules && renderRules()}
       {showJoinPanel && renderJoinPanel()}
       
-      {/* Mobile Controls Overlay */}
       {isMobile && gameState.phase === GamePhase.PLAYING && (
          <MobileControls 
              inputRef={inputRef} 
@@ -989,7 +1021,6 @@ const App: React.FC = () => {
          />
       )}
 
-      {/* Exit Button - Desktop Only */}
       {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
         <button 
             onClick={() => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }))}
@@ -1000,11 +1031,27 @@ const App: React.FC = () => {
         </button>
       )}
 
-      {/* COMPACT HUD Header for Mobile - Overlay on Canvas */}
+      {/* Latency / Lag Indicator in Game */}
+      {gameState.phase === GamePhase.PLAYING && (gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT) && (
+          <div className="absolute top-4 left-4 z-50 flex flex-col items-start gap-1 pointer-events-none">
+               {latency !== null && (
+                   <div className="bg-black/40 px-2 py-1 rounded border border-white/10 flex items-center gap-2 backdrop-blur-sm">
+                        <Signal size={14} className={isLagging ? "text-red-500 animate-pulse" : latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
+                        <span className="text-[10px] font-mono text-stone-300">{isLagging ? '---' : `${latency}ms`}</span>
+                   </div>
+               )}
+               {isLagging && (
+                   <div className="bg-red-900/80 px-2 py-1 rounded border border-red-500 flex items-center gap-2 backdrop-blur-sm animate-pulse">
+                        <WifiOff size={14} className="text-red-200" />
+                        <span className="text-[10px] font-bold text-red-100">连接不稳定</span>
+                   </div>
+               )}
+          </div>
+      )}
+
       {gameState.phase === GamePhase.PLAYING && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
              <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
-                {/* Hunter Info */}
                 <div className={`flex items-center gap-2 p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
                 <div className="flex flex-col">
                     <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
@@ -1015,7 +1062,6 @@ const App: React.FC = () => {
                 </div>
                 </div>
 
-                {/* Time Bar */}
                 <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
                 <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none font-bold text-shadow">
                     {gameState.isNight ? "存活" : "入夜"}
@@ -1034,7 +1080,6 @@ const App: React.FC = () => {
                 </span>
                 </div>
 
-                {/* Demon Info */}
                 <div className={`flex items-center gap-2 text-right p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
                 <div className="flex flex-col items-end">
                     <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
@@ -1046,7 +1091,6 @@ const App: React.FC = () => {
                 </div>
              </div>
             
-            {/* Cabin Entry Progress Overlay - Moved to be part of canvas or screen UI */}
             {gameState.hunter.enterTimer > 0 && !gameState.hunter.inCabin && (
                 <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-neutral-900/90 px-3 py-1 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50 shadow-xl backdrop-blur">
                     <span className="text-[10px] flex items-center gap-1 font-bold animate-pulse whitespace-nowrap">
@@ -1069,10 +1113,8 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* Main Content Area - Fullscreen Centered */}
       <div className={`w-full h-full flex items-center justify-center overflow-y-auto ${gameState.phase !== GamePhase.PLAYING ? 'py-8' : ''}`}>
         
-        {/* Menu & Lobby Container */}
         {(gameState.phase === GamePhase.MENU || gameState.phase === GamePhase.LOBBY) && (
             <div className="w-full max-w-4xl mx-auto flex flex-col items-center justify-center min-h-full">
                 {gameState.phase === GamePhase.MENU && renderMenu()}
@@ -1080,16 +1122,13 @@ const App: React.FC = () => {
             </div>
         )}
         
-        {/* Game Canvas & Overlays - Maximize Screen */}
         {(gameState.phase === GamePhase.PLAYING || 
           gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS || 
           gameState.phase === GamePhase.GAME_OVER_DEMON_WINS) && (
             <div className="relative w-full h-full flex items-center justify-center">
-                {/* Canvas Container that fits 4:3 ratio inside available space */}
                 <div className="relative aspect-[4/3] h-full w-auto max-w-full max-h-full shadow-2xl flex items-center justify-center">
                     <GameCanvas gameState={gameState} cameraTarget={cameraTarget} />
                     
-                    {/* Game Over Overlay */}
                     {gameState.phase !== GamePhase.PLAYING && (
                     <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-30 backdrop-blur-sm px-8 text-center border-2 border-stone-800">
                         <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
@@ -1112,7 +1151,6 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* Event Log - FIXED POSITION */}
         {gameState.phase === GamePhase.PLAYING && (
             <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center z-20 px-4 w-full pointer-events-none gap-1">
                 {gameState.messages.slice(0, 3).map((msg) => (
