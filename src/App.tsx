@@ -235,17 +235,19 @@ const App: React.FC = () => {
       if (gameMode === GameMode.ONLINE_HOST && connRef.current && opponentMode === 'CONNECTED') {
           // Safe send
           try {
-             connRef.current.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
+             const lobbyMsg = { type: 'LOBBY_UPDATE', hostRole: myRole };
+             connRef.current.send(lobbyMsg);
           } catch(e) { console.error("Lobby update failed", e); }
       }
   }, [myRole, gameMode, opponentMode]);
 
-  // Heartbeat / PING Loop for Host
+  // Shared Ping Logic (Bi-directional)
   useEffect(() => {
-    if (gameMode === GameMode.ONLINE_HOST && opponentMode === 'CONNECTED') {
+    if ((gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT) && opponentMode === 'CONNECTED') {
         pingIntervalRef.current = window.setInterval(() => {
             if (connRef.current && connRef.current.open) {
-                connRef.current.send({ type: 'PING', timestamp: Date.now() });
+                const pingMsg = { type: 'PING', timestamp: Date.now() };
+                connRef.current.send(pingMsg);
             }
         }, 1000);
     } else {
@@ -357,6 +359,8 @@ const App: React.FC = () => {
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
           remoteInputRef.current = data.input;
+        } else if (data.type === 'PING') {
+            conn.send({ type: 'PONG', timestamp: data.timestamp });
         } else if (data.type === 'PONG') {
             const rtt = Date.now() - data.timestamp;
             setLatency(rtt);
@@ -431,8 +435,10 @@ const App: React.FC = () => {
         } else if (data.type === 'STATE_UPDATE') {
             setGameState(data.state);
         } else if (data.type === 'PING') {
-            // Reply with PONG immediately
             conn.send({ type: 'PONG', timestamp: data.timestamp });
+        } else if (data.type === 'PONG') {
+            const rtt = Date.now() - data.timestamp;
+            setLatency(rtt);
         }
       });
       
@@ -908,7 +914,10 @@ const App: React.FC = () => {
                                 : 'bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20'}`}
                     >
                         {isGuest 
-                            ? <><Info size={18} /> 等待房主开始</> 
+                            ? <div className="flex flex-col items-center leading-none">
+                                <span className="flex items-center gap-2"><Info size={18} /> 等待房主开始</span>
+                                {latency !== null && <span className="text-[10px] opacity-70 mt-1 font-mono">延迟: {latency}ms</span>}
+                              </div>
                             : (opponentMode === 'CONNECTED' ? <><Play size={18} /> 开始游戏</> : <><Users size={18} /> 等待玩家加入...</>)
                         }
                     </button>
