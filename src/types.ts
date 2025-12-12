@@ -120,4 +120,6 @@ export type NetworkMessage =
   | { type: 'INPUT_UPDATE'; input: PlayerInput }
   | { type: 'PLAYER_JOINED'; role: PlayerRole }
   | { type: 'LOBBY_UPDATE'; hostRole: EntityType }
-  | { type: 'START_GAME'; clientRole: EntityType };
+  | { type: 'START_GAME'; clientRole: EntityType; initialState: GameState }
+  | { type: 'PING'; timestamp: number }
+  | { type: 'PONG'; timestamp: number };

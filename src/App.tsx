@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import GameCanvas from './components/GameCanvas';
 import { MobileControls } from './components/MobileControls';
-import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput, NetworkMessage } from './types';
+import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput } from './types';
 import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
 import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Eye, Users, Monitor, Link, ArrowRight, Copy, Check, Info, Trees, LockKeyhole, User, UserPlus, Cpu, LogOut, BookOpen, X } from 'lucide-react';
+import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // --- Initial State Factory ---
@@ -182,17 +182,21 @@ const App: React.FC = () => {
   const [gameMode, setGameMode] = useState<GameMode>(GameMode.SINGLE_PLAYER);
   const [isCopied, setIsCopied] = useState(false);
   const [showRules, setShowRules] = useState(false);
+  const [showJoinPanel, setShowJoinPanel] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   
   // New Role & Opponent State
   const [myRole, setMyRole] = useState<EntityType>(EntityType.HUNTER);
   const [opponentMode, setOpponentMode] = useState<OpponentMode>('WAITING');
+  const [joinError, setJoinError] = useState<string>("");
+  const [latency, setLatency] = useState<number | null>(null);
 
   // Networking Refs
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   const isHostRef = useRef<boolean>(true);
   const networkTickRef = useRef<number>(0);
+  const pingIntervalRef = useRef<number | null>(null);
   
   // Input Refs
   const inputRef = useRef<InputState>({
@@ -208,10 +212,11 @@ const App: React.FC = () => {
   const requestRef = useRef<number>();
   const lastTimeRef = useRef<number>(0);
 
-  // Initialize PeerJS
+  // Initialize PeerJS cleanup
   useEffect(() => {
     return () => {
       if (peerRef.current) peerRef.current.destroy();
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
     };
   }, []);
 
@@ -234,6 +239,27 @@ const App: React.FC = () => {
           } catch(e) { console.error("Lobby update failed", e); }
       }
   }, [myRole, gameMode, opponentMode]);
+
+  // Heartbeat / PING Loop for Host
+  useEffect(() => {
+    if (gameMode === GameMode.ONLINE_HOST && opponentMode === 'CONNECTED') {
+        pingIntervalRef.current = window.setInterval(() => {
+            if (connRef.current && connRef.current.open) {
+                connRef.current.send({ type: 'PING', timestamp: Date.now() });
+            }
+        }, 1000);
+    } else {
+        if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+        }
+        setLatency(null);
+    }
+    return () => {
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+    }
+  }, [gameMode, opponentMode]);
+
 
   // Keyboard Listeners
   useEffect(() => {
@@ -278,21 +304,49 @@ const App: React.FC = () => {
 
   // --- Network Logic ---
   const initializeHost = () => {
-    // If we are already a host, clean up
-    if (peerRef.current) peerRef.current.destroy();
+    // Aggressive cleanup
+    if (peerRef.current) {
+        peerRef.current.destroy();
+        peerRef.current = null;
+    }
+    if (connRef.current) {
+        connRef.current.close();
+        connRef.current = null;
+    }
 
+    setOpponentMode('WAITING'); // Ensure fresh state
+    setLatency(null);
+    
     const id = generateRoomId();
     setRoomId(id);
     const peer = new Peer(id, { debug: 1 });
     
     peer.on('open', (id) => {
+      // Guard: If this peer has been replaced or destroyed, ignore
+      if (peer !== peerRef.current) return;
+      
       console.log('My peer ID is: ' + id);
       setGameMode(GameMode.ONLINE_HOST);
       isHostRef.current = true;
     });
+    
+    peer.on('error', (err) => {
+        // Guard
+        if (peer !== peerRef.current) return;
+
+        console.error("Host Peer Error:", err);
+        setJoinError("创建房间失败");
+        alert(`创建失败: ${err.type}`);
+        // Go back to menu on error to avoid broken lobby state
+        setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+    });
 
     peer.on('connection', (conn) => {
+      // Guard
+      if (peer !== peerRef.current) return;
+
       conn.on('open', () => {
+        if (peer !== peerRef.current) return; // Extra check
         setOpponentMode('CONNECTED');
         connRef.current = conn;
         // Notify client they are joined and sync initial role
@@ -303,11 +357,17 @@ const App: React.FC = () => {
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
           remoteInputRef.current = data.input;
+        } else if (data.type === 'PONG') {
+            const rtt = Date.now() - data.timestamp;
+            setLatency(rtt);
         }
       });
       conn.on('close', () => {
-          setOpponentMode('WAITING');
-          connRef.current = null;
+        if (conn === connRef.current) {
+             setOpponentMode('WAITING');
+             connRef.current = null;
+             setLatency(null);
+        }
       });
       conn.on('error', (err) => {
           console.error("Connection error", err);
@@ -318,20 +378,38 @@ const App: React.FC = () => {
   };
 
   const joinGame = () => {
-    if (!joinId) return;
+    setJoinError("");
+    if (!joinId) {
+        setJoinError("请输入房间号");
+        return;
+    }
+    
     if (peerRef.current) peerRef.current.destroy();
 
-    const peer = new Peer();
+    const peer = new Peer(generateRoomId());
     
+    peer.on('error', (err: any) => {
+        if (peer !== peerRef.current) return;
+        console.error("Peer Error:", err);
+        if (err.type === 'peer-unavailable') {
+            setJoinError("房间号不存在或主机未连接");
+        } else {
+            setJoinError("连接错误，请检查网络或房间号");
+        }
+    });
+
     peer.on('open', (id) => {
-      const conn = peer.connect(joinId);
+      if (peer !== peerRef.current) return;
+      const conn = peer.connect(joinId.trim().toUpperCase());
+      
       conn.on('open', () => {
+        if (peer !== peerRef.current) return;
         console.log("Connected to: " + joinId);
+        setJoinError(""); 
+        setShowJoinPanel(false); 
         setRoomId(joinId);
         setGameMode(GameMode.ONLINE_CLIENT);
         isHostRef.current = false;
-        
-        // Default client to opposite of default host (Demon), but will be updated via LOBBY_UPDATE
         setMyRole(EntityType.DEMON); 
         
         setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }));
@@ -341,21 +419,20 @@ const App: React.FC = () => {
 
       conn.on('data', (data: any) => {
         if (data.type === 'LOBBY_UPDATE') {
-            // Host changed role, so Client takes the opposite
             setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
-        }
-        if (data.type === 'START_GAME') {
-             // Host sends game start signal with assigned role AND initial state
+        } else if (data.type === 'START_GAME') {
              if (data.clientRole) {
                  setMyRole(data.clientRole);
              }
              if (data.initialState) {
-                 // Force entry into game immediately with received state
                  setGameState(data.initialState);
+                 lastTimeRef.current = 0; 
              }
-        }
-        if (data.type === 'STATE_UPDATE') {
+        } else if (data.type === 'STATE_UPDATE') {
             setGameState(data.state);
+        } else if (data.type === 'PING') {
+            // Reply with PONG immediately
+            conn.send({ type: 'PONG', timestamp: data.timestamp });
         }
       });
       
@@ -369,8 +446,17 @@ const App: React.FC = () => {
   };
 
   const startGame = () => {
-    // Only Host can start online games
+    // 1. Client cannot start
     if (gameMode === GameMode.ONLINE_CLIENT) return;
+
+    // 2. Host STRICT check: Must have connection Ref and Status
+    // This prevents any UI flicker "click through"
+    if (gameMode === GameMode.ONLINE_HOST) {
+        if (!connRef.current || opponentMode !== 'CONNECTED') {
+            console.warn("Attempted to start game without valid connection");
+            return;
+        }
+    }
 
     // Create new state
     const newState = createInitialState();
@@ -401,7 +487,6 @@ const App: React.FC = () => {
     if (connRef.current && isHostRef.current) {
         const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
         try {
-            // Deep clone to ensure clean object
             const cleanState = JSON.parse(JSON.stringify(newState));
             connRef.current.send({ 
                 type: 'START_GAME', 
@@ -518,6 +603,51 @@ const App: React.FC = () => {
     setTimeout(() => setIsCopied(false), 2000);
   };
 
+  const renderJoinPanel = () => (
+      <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-md w-full p-8 relative shadow-2xl flex flex-col items-center gap-6">
+              <button 
+                  onClick={() => setShowJoinPanel(false)}
+                  className="absolute top-4 right-4 text-stone-400 hover:text-white"
+              >
+                  <X size={24} />
+              </button>
+              
+              <h2 className="text-3xl font-bold text-stone-200 flex items-center gap-2">
+                  <Link size={28} className="text-blue-400"/> 加入游戏
+              </h2>
+              
+              <div className="w-full flex flex-col gap-2">
+                  <label className="text-xs text-stone-400 uppercase font-bold tracking-wider ml-1">输入房间号</label>
+                  <input 
+                      type="text" 
+                      placeholder="CODE" 
+                      className={`w-full bg-stone-900 border-2 rounded-lg p-4 text-center text-3xl font-mono tracking-widest text-white uppercase focus:outline-none focus:ring-2 transition-all
+                          ${joinError ? 'border-red-500 focus:ring-red-500/50' : 'border-stone-700 focus:border-blue-500 focus:ring-blue-500/50'}`}
+                      onChange={(e) => {
+                          setJoinId(e.target.value.toUpperCase()); // Force Uppercase
+                          if(joinError) setJoinError("");
+                      }}
+                      value={joinId}
+                      maxLength={6}
+                  />
+                  {joinError && (
+                      <span className="text-sm text-red-500 font-bold text-center animate-pulse flex items-center justify-center gap-1">
+                          <Info size={14}/> {joinError}
+                      </span>
+                  )}
+              </div>
+
+              <button 
+                  onClick={joinGame}
+                  className="w-full py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold text-lg shadow-lg hover:shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                  <ArrowRight size={20} /> 连接房间
+              </button>
+          </div>
+      </div>
+  );
+
   const renderRules = () => (
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
@@ -590,6 +720,12 @@ const App: React.FC = () => {
 
       <button 
         onClick={() => {
+            // Set GameMode IMMEDIATE to avoid button flicker in Lobby
+            setGameMode(GameMode.ONLINE_HOST); 
+            // Set WAITING immediately to disable Start button
+            setOpponentMode('WAITING');
+            setLatency(null);
+
             initializeHost();
             setMyRole(EntityType.HUNTER); // Default Host to Hunter
             setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
@@ -599,26 +735,21 @@ const App: React.FC = () => {
         <Users size={20}/> 创建在线房间
       </button>
 
-      <div className="flex gap-2 w-64">
-          <input 
-            type="text" 
-            placeholder="输入房间号" 
-            className="flex-1 bg-stone-900 border border-stone-700 rounded px-3 text-stone-200 uppercase"
-            onChange={(e) => setJoinId(e.target.value)}
-            value={joinId}
-          />
-          <button 
-            onClick={joinGame}
-            className="px-4 bg-blue-600 text-white rounded hover:bg-blue-500 font-bold"
-          >
-            <ArrowRight size={20} />
-          </button>
-      </div>
+      <button 
+        onClick={() => {
+            setJoinError("");
+            setShowJoinPanel(true);
+        }}
+        className="w-64 py-4 bg-stone-800 text-stone-200 border border-stone-600 font-bold rounded hover:scale-105 transition flex items-center justify-center gap-2"
+      >
+        <Link size={20}/> 加入在线房间
+      </button>
     </div>
   );
 
   const renderLobby = () => {
     const isGuest = gameMode === GameMode.ONLINE_CLIENT;
+    const isOnline = gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT;
 
     // Helper to render a player card
     const renderCard = (role: EntityType) => {
@@ -707,7 +838,7 @@ const App: React.FC = () => {
     return (
         <div className="bg-neutral-800 p-4 md:p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center relative my-auto">
             <h2 className="text-2xl md:text-3xl font-bold text-stone-200 mb-6 flex items-center gap-3">
-                <Users /> 选择角色
+                <Users /> 选择角色 {isOnline && <span className="text-xs text-blue-400 bg-blue-900/30 px-2 py-1 rounded border border-blue-500/30">在线模式</span>}
             </h2>
 
             <button 
@@ -727,6 +858,14 @@ const App: React.FC = () => {
                     </button>
                 </div>
             )}
+            
+            {/* Latency Display */}
+            {opponentMode === 'CONNECTED' && latency !== null && (
+                <div className="absolute top-4 left-4 md:top-8 md:left-8 flex items-center gap-2">
+                    <Signal size={18} className={latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
+                    <span className="text-stone-400 text-xs font-mono">{latency}ms</span>
+                </div>
+            )}
 
             {/* Role Cards */}
             <div className="flex flex-row gap-4 md:gap-8 mb-8">
@@ -740,7 +879,9 @@ const App: React.FC = () => {
                 <button 
                     onClick={() => {
                         if (peerRef.current) peerRef.current.destroy();
+                        if (connRef.current) connRef.current.close();
                         setGameMode(GameMode.SINGLE_PLAYER);
+                        setOpponentMode('WAITING');
                         setGameState(prev => ({...prev, phase: GamePhase.MENU}));
                     }}
                     className="flex-1 py-3 border border-stone-600 text-stone-400 rounded hover:bg-stone-700 transition"
@@ -748,24 +889,35 @@ const App: React.FC = () => {
                     返回
                 </button>
                 
-                <button 
-                    onClick={startGame}
-                    disabled={isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED')}
-                    className={`flex-1 py-3 font-bold rounded flex items-center justify-center gap-2 transition
-                        ${(isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED'))
-                            ? 'bg-stone-700 text-stone-500 cursor-not-allowed' 
-                            : 'bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20'}`}
-                >
-                    {isGuest 
-                      ? <><Info size={18} /> 等待主机开始</> 
-                      : <><Play size={18} /> 开始游戏</>
-                    }
-                </button>
+                {/* START BUTTON LOGIC SPLIT */}
+                {gameMode === GameMode.SINGLE_PLAYER ? (
+                    <button 
+                        onClick={startGame}
+                        className="flex-1 py-3 font-bold rounded flex items-center justify-center gap-2 transition bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20"
+                    >
+                        <Play size={18} /> 开始游戏
+                    </button>
+                ) : (
+                    // ONLINE MODE BUTTONS
+                    <button 
+                        onClick={startGame}
+                        disabled={isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED')}
+                        className={`flex-1 py-3 font-bold rounded flex items-center justify-center gap-2 transition
+                            ${(isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED'))
+                                ? 'bg-stone-700 text-stone-500 cursor-not-allowed' 
+                                : 'bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20'}`}
+                    >
+                        {isGuest 
+                            ? <><Info size={18} /> 等待房主开始</> 
+                            : (opponentMode === 'CONNECTED' ? <><Play size={18} /> 开始游戏</> : <><Users size={18} /> 等待玩家加入...</>)
+                        }
+                    </button>
+                )}
             </div>
             
             {gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED' && (
                 <p className="text-sm text-yellow-500 mt-4 flex items-center gap-2 animate-pulse">
-                    <Info size={16}/> 等待玩家加入...
+                    <Info size={16}/> 等待玩家加入以开始游戏...
                 </p>
             )}
             {gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'WAITING' && (
@@ -785,6 +937,7 @@ const App: React.FC = () => {
     <div className={`h-[100dvh] w-full bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden relative`}>
       
       {showRules && renderRules()}
+      {showJoinPanel && renderJoinPanel()}
       
       {/* Mobile Controls Overlay */}
       {isMobile && gameState.phase === GamePhase.PLAYING && (
