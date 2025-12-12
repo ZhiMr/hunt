@@ -466,7 +466,7 @@ const App: React.FC = () => {
   };
 
   const renderRules = () => (
-      <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+      <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
               <button 
                   onClick={() => setShowRules(false)}
@@ -718,9 +718,13 @@ const App: React.FC = () => {
   };
 
   const cameraTarget = myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON';
+  
+  const isPlaying = gameState.phase === GamePhase.PLAYING;
 
   return (
-    <div className="min-h-screen bg-neutral-900 text-stone-200 flex flex-col items-center justify-start pt-2 md:justify-center md:pt-0 font-mono overflow-hidden">
+    <div className={`min-h-screen bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden
+        ${isPlaying ? 'justify-start pt-2 md:justify-center md:pt-0' : 'justify-center'}
+    `}>
       
       {showRules && renderRules()}
       

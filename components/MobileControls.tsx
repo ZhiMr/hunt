@@ -16,6 +16,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ inputRef, onExit
   // Joystick Logic
   const handleStart = (e: React.TouchEvent) => {
     e.preventDefault(); // Prevent scroll
+    e.stopPropagation();
     const touch = e.changedTouches[0];
     touchIdRef.current = touch.identifier;
     setActive(true);
@@ -24,10 +25,10 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ inputRef, onExit
 
   const handleMove = (e: React.TouchEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     if (touchIdRef.current === null) return;
     
     // Find the touch that started this
-    // Iterate manually to avoid TS issues with TouchList iterator or use explicit type
     let touch: React.Touch | undefined;
     for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === touchIdRef.current) {
@@ -41,6 +42,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ inputRef, onExit
 
   const handleEnd = (e: React.TouchEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     // Only reset if our touch ended
     let touch: React.Touch | undefined;
     for (let i = 0; i < e.changedTouches.length; i++) {
@@ -104,24 +106,27 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ inputRef, onExit
   // Action Button Logic
   const handleActionStart = (e: React.TouchEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     inputRef.current.space = true; // Use space/enter mapping
     inputRef.current.enter = true;
   };
   
   const handleActionEnd = (e: React.TouchEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     inputRef.current.space = false;
     inputRef.current.enter = false;
   };
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-50 flex flex-col justify-end pb-8 px-6 select-none touch-none">
+    <div className="fixed inset-0 pointer-events-none z-[100] flex flex-col justify-end pb-8 px-6 select-none touch-none">
       <div className="flex justify-between items-end w-full">
         
         {/* Joystick Area */}
         <div 
           ref={joystickRef}
-          className="relative w-32 h-32 bg-white/10 rounded-full backdrop-blur-sm border-2 border-white/20 pointer-events-auto"
+          className="relative w-32 h-32 bg-white/10 rounded-full backdrop-blur-sm border-2 border-white/20 pointer-events-auto touch-none"
+          style={{ touchAction: 'none' }}
           onTouchStart={handleStart}
           onTouchMove={handleMove}
           onTouchEnd={handleEnd}
@@ -143,16 +148,19 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ inputRef, onExit
           {onExit && (
              <button 
                 onClick={onExit}
-                className="w-12 h-12 mb-2 rounded-full bg-red-900/50 border border-red-500 text-red-200 flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm"
+                className="w-12 h-12 mb-2 rounded-full bg-red-900/50 border border-red-500 text-red-200 flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm touch-none"
+                style={{ touchAction: 'none' }}
               >
                 <span className="text-xs font-bold">退出</span>
               </button>
           )}
 
           <button 
-            className="w-20 h-20 rounded-full bg-green-600/80 border-4 border-green-400/50 flex items-center justify-center active:scale-90 active:bg-green-500 transition-transform shadow-lg backdrop-blur-sm"
+            className="w-20 h-20 rounded-full bg-green-600/80 border-4 border-green-400/50 flex items-center justify-center active:scale-90 active:bg-green-500 transition-transform shadow-lg backdrop-blur-sm touch-none"
+            style={{ touchAction: 'none' }}
             onTouchStart={handleActionStart}
             onTouchEnd={handleActionEnd}
+            onTouchCancel={handleActionEnd}
           >
             <Swords size={32} className="text-white" />
           </button>
