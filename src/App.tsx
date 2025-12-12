@@ -196,7 +196,7 @@ const App: React.FC = () => {
   const connRef = useRef<DataConnection | null>(null);
   const isHostRef = useRef<boolean>(true);
   const networkTickRef = useRef<number>(0);
-  const inputTickRef = useRef<number>(0); // Throttle input sending
+  const inputTickRef = useRef<number>(0);
   const pingIntervalRef = useRef<number | null>(null);
   
   // Input Refs
@@ -210,7 +210,7 @@ const App: React.FC = () => {
     up: false, down: false, left: false, right: false, action: false
   });
 
-  const requestRef = useRef<number>();
+  const requestRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
 
   // Initialize PeerJS cleanup
@@ -325,37 +325,31 @@ const App: React.FC = () => {
     const peer = new Peer(id, { debug: 1 });
     
     peer.on('open', (id) => {
-      // Guard: If this peer has been replaced or destroyed, ignore
       if (peer !== peerRef.current) return;
-      
       console.log('My peer ID is: ' + id);
       setGameMode(GameMode.ONLINE_HOST);
       isHostRef.current = true;
     });
     
     peer.on('error', (err) => {
-        // Guard
         if (peer !== peerRef.current) return;
-
         console.error("Host Peer Error:", err);
         setJoinError("创建房间失败");
-        alert(`创建失败: ${err.type}`);
-        // Go back to menu on error to avoid broken lobby state
+        window.alert(`创建失败: ${err.type}`);
         setGameState(prev => ({...prev, phase: GamePhase.MENU}));
     });
 
     peer.on('connection', (conn) => {
-      // Guard
       if (peer !== peerRef.current) return;
 
       conn.on('open', () => {
-        if (peer !== peerRef.current) return; // Extra check
+        if (peer !== peerRef.current) return;
         setOpponentMode('CONNECTED');
         connRef.current = conn;
-        // Notify client they are joined and sync initial role
+        // Host immediately sends LOBBY_UPDATE upon connection to sync roles
         try {
-            conn.send({ type: 'PLAYER_JOINED', role: PlayerRole.CLIENT });
-        } catch(e) { console.error("Failed to send player join", e); }
+            conn.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
+        } catch(e) { console.error("Failed to send lobby update", e); }
       });
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
@@ -415,6 +409,8 @@ const App: React.FC = () => {
         setRoomId(joinId);
         setGameMode(GameMode.ONLINE_CLIENT);
         isHostRef.current = false;
+        
+        // Initial assumption, will be corrected by LOBBY_UPDATE
         setMyRole(EntityType.DEMON); 
         
         setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }));
@@ -426,6 +422,8 @@ const App: React.FC = () => {
         if (data.type === 'LOBBY_UPDATE') {
             setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
         } else if (data.type === 'START_GAME') {
+             // CRITICAL: CLIENT REPLACES ENTIRE STATE ON START
+             // This ensures map (trees/cabin) is identical to host
              if (data.clientRole) {
                  setMyRole(data.clientRole);
              }
@@ -434,18 +432,23 @@ const App: React.FC = () => {
                  lastTimeRef.current = 0; 
              }
         } else if (data.type === 'STATE_UPDATE') {
-            // Merge dynamic state with local static state to optimize payload
-            // The Host sends full state except trees/cabin to save bandwidth
-            // But here we might receive full state or partial.
-            // If the host sends partial (optimized), we need to merge.
-            // For now, let's assume we simply update.
+            // CLIENT STATE RECONCILIATION
+            // Merge dynamic data from Host with local static data (trees/cabin)
+            // This prevents "flicker" or missing objects if host optimizes packet size
             setGameState(prev => {
-                // If received state lacks trees (optimization), keep local trees
-                const receivedState = data.state;
-                if (!receivedState.trees || receivedState.trees.length === 0) {
-                    return { ...receivedState, trees: prev.trees, cabin: prev.cabin };
-                }
-                return receivedState;
+                // If phase is different (e.g. GAME_OVER), respect the host's phase
+                // But generally we are in PLAYING.
+                
+                // If the incoming state is partial (optimized), we retain our trees/cabin
+                const newState = {
+                    ...prev,
+                    ...data.state,
+                    // IMPORTANT: Ensure static obstacles are preserved from the START_GAME state
+                    // if the host sends them as empty/undefined in updates.
+                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
+                    cabin: data.state.cabin ? data.state.cabin : prev.cabin,
+                };
+                return newState;
             });
         } else if (data.type === 'PING') {
             conn.send({ type: 'PONG', timestamp: data.timestamp });
@@ -456,7 +459,7 @@ const App: React.FC = () => {
       });
       
       conn.on('close', () => {
-          alert("Host disconnected");
+          window.alert("Host disconnected");
           setGameState(prev => ({...prev, phase: GamePhase.MENU}));
       });
     });
@@ -468,8 +471,7 @@ const App: React.FC = () => {
     // 1. Client cannot start
     if (gameMode === GameMode.ONLINE_CLIENT) return;
 
-    // 2. Host STRICT check: Must have connection Ref and Status
-    // This prevents any UI flicker "click through"
+    // 2. Host STRICT check
     if (gameMode === GameMode.ONLINE_HOST) {
         if (!connRef.current || opponentMode !== 'CONNECTED') {
             console.warn("Attempted to start game without valid connection");
@@ -477,7 +479,7 @@ const App: React.FC = () => {
         }
     }
 
-    // Create new state
+    // Create new state (Host is authoritative on map generation)
     const newState = createInitialState();
     const obstacles = [...newState.trees, newState.cabin];
 
@@ -502,15 +504,16 @@ const App: React.FC = () => {
     newState.demon.pos = spawnPos;
     newState.phase = GamePhase.PLAYING;
 
-    // Send START_GAME with initial state to client
+    // Send START_GAME with FULL initial state to client
     if (connRef.current && isHostRef.current) {
         const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
         try {
-            const cleanState = JSON.parse(JSON.stringify(newState));
+            // Must Deep Clone to ensure clean JSON serialization
+            const fullState = JSON.parse(JSON.stringify(newState));
             connRef.current.send({ 
                 type: 'START_GAME', 
                 clientRole,
-                initialState: cleanState 
+                initialState: fullState 
             });
         } catch(e) {
             console.error("Failed to send START_GAME", e);
@@ -528,11 +531,12 @@ const App: React.FC = () => {
     lastTimeRef.current = timestamp;
     const safeDelta = Math.min(deltaTime, 0.1); 
 
-    // CLIENT MODE: Only Send Input, Do NOT touch State locally (Wait for Server)
+    // CLIENT MODE: PURE CLIENT
+    // Client does NOT run physics. Client only Sends Input and Renders (via state updates).
     if (gameMode === GameMode.ONLINE_CLIENT) {
-        // Throttle Input Sending (approx 20fps)
+        // Throttle Input Sending (approx 30fps) to prevent clogging
         inputTickRef.current += deltaTime;
-        if (inputTickRef.current >= 0.05) { 
+        if (inputTickRef.current >= 0.033) { 
             if (connRef.current && connRef.current.open) {
                 const myInput: PlayerInput = {
                     up: inputRef.current.up || inputRef.current.w,
@@ -548,16 +552,16 @@ const App: React.FC = () => {
             inputTickRef.current = 0;
         }
         
-        // Loop purely for input checking, render happens via useEffect on gameState change from Network
+        // Loop purely to keep RAF alive, but NO state updates here.
         requestRef.current = requestAnimationFrame(loop);
         return; 
     }
 
-    // HOST / SINGLE PLAYER MODE: Update State
+    // HOST / SINGLE PLAYER MODE: AUTHORITATIVE
     setGameState(prev => {
       if (prev.phase !== GamePhase.PLAYING) return prev;
 
-      // HOST or SINGLE PLAYER: Run Logic
+      // Prepare Inputs
       let hunterIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
       let demonIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
 
@@ -578,46 +582,43 @@ const App: React.FC = () => {
 
       // 2. Assign Opponent Input
       if (gameMode === GameMode.ONLINE_HOST) {
-          // Opponent is Networked Player
+          // Use latest received input from Client
           if (myRole === EntityType.HUNTER) demonIn = remoteInputRef.current;
           else hunterIn = remoteInputRef.current;
       } else {
-          // Single Player / Local Host with Bot
+          // Single Player / Bot
           if (opponentMode === 'COMPUTER') {
-             // Calculate Bot Input
              const obstacles = [...prev.trees, prev.cabin];
              if (myRole === EntityType.HUNTER) {
-                 // Bot controls Demon
                  demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight, safeDelta);
              } else {
-                 // Bot controls Hunter
                  hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight, safeDelta);
              }
           }
       }
 
+      // 3. Update Physics
       let nextState;
       try {
           nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
       } catch (err) {
           console.error("Game Logic Error:", err);
-          return prev; // Fallback to avoid crash
+          return prev; 
       }
 
-      // If Host, broadcast state
-      // THROTTLE NETWORK UPDATES: Send only every ~66ms (15fps) to prevent congestion
+      // 4. Host Broadcast (Throttled ~20 FPS)
       if (gameMode === GameMode.ONLINE_HOST && connRef.current) {
           networkTickRef.current += deltaTime;
-          if (networkTickRef.current >= 0.066) { // ~15 FPS
+          if (networkTickRef.current >= 0.05) { 
               try {
                   if (connRef.current.open) {
-                      // Optimization: Exclude static trees/cabin to save bandwidth
-                      // We can assume client has them from START_GAME
+                      // Optimization: Exclude heavy static data (Trees/Cabin)
+                      // Client already has them from START_GAME
                       const { trees, cabin, ...dynamicState } = nextState;
                       connRef.current.send({ type: 'STATE_UPDATE', state: dynamicState });
                   }
               } catch(e) {
-                  console.error("Network send failed", e);
+                  // swallow errors
               }
               networkTickRef.current = 0;
           }
