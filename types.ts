@@ -47,6 +47,14 @@ export interface Demon extends Player {
   energy: number; // Consumed to speed up night
   isRevealed: boolean; // True at night
   stunTimer: number; // Time remaining stunned (in seconds)
+  trackingActiveTime: number; // How long the tracking arrow is visible
+  canTrack: boolean; // Whether the one-time night tracking is available
+}
+
+export interface GameMessage {
+  id: number;
+  text: string;
+  timeLeft: number;
 }
 
 export interface GameState {
@@ -64,7 +72,7 @@ export interface GameState {
   mapWidth: number;
   mapHeight: number;
   lastShotTime: number;
-  messages: string[]; // Recent game events
+  messages: GameMessage[]; // Recent game events with timer
 }
 
 // Separate inputs for better networking/AI control

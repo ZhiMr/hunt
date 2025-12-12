@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { GameState, Entity, EntityType, Vector2 } from '../types';
-import { COLORS, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT, VISION_RADIUS_DIM, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, MAP_SIZE, TREE_COLLISION_RATIO } from '../constants';
+import { COLORS, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT, VISION_RADIUS_DIM, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, MAP_SIZE, TREE_COLLISION_RATIO, RENDER_SCALE } from '../constants';
 import { distance } from '../utils/gameLogic';
 
 interface GameCanvasProps {
@@ -10,6 +10,10 @@ interface GameCanvasProps {
 
 const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  // Refs for smoothing vision
+  const prevDistancesRef = useRef<Float32Array | null>(null);
+  const lastSourcePosRef = useRef<Vector2 | null>(null);
 
   // --- Rendering Helpers ---
   const drawEntity = (ctx: CanvasRenderingContext2D, entity: Entity, color: string, isDemon = false) => {
@@ -26,7 +30,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     ctx.fillStyle = color;
     
     if (entity.type === EntityType.TREE) {
-      // Draw Pixel Art Tree (Simple Shapes)
+      // Draw Tree (Simple Shapes)
       ctx.fillStyle = '#4a2c2a'; // Trunk
       ctx.fillRect(-6, -entity.size, 12, entity.size);
       ctx.fillStyle = color; // Leaves
@@ -164,8 +168,19 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false }); // Optimize alpha
     if (!ctx) return;
+
+    // --- Render Setup ---
+    // Reset transform to clear the entire physical canvas
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Enable smoothing for smooth vector-like look
+    ctx.imageSmoothingEnabled = true;
+
+    // Apply scaling for High DPI / Resolution
+    ctx.scale(RENDER_SCALE, RENDER_SCALE);
 
     // --- Camera Logic ---
     const targetEntity = cameraTarget === 'HUNTER' ? gameState.hunter : gameState.demon;
@@ -176,8 +191,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     camX = Math.max(0, Math.min(camX, MAP_SIZE - VIEWPORT_WIDTH));
     camY = Math.max(0, Math.min(camY, MAP_SIZE - VIEWPORT_HEIGHT));
 
-    // Clear Screen
-    ctx.clearRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     
     // 1. Base Layer: Ground (Dim)
     ctx.save();
@@ -193,10 +206,25 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
        ctx.translate(obj.pos.x, obj.pos.y);
        ctx.fillStyle = '#222'; // Silhouette
        // Simple circles/rects for silhouette
-       if(obj.type === EntityType.CABIN) ctx.fillRect(-obj.size, -obj.size, obj.size*2, obj.size*2);
+       if(obj.type === EntityType.CABIN) {
+           // Body
+           ctx.fillRect(-obj.size, -obj.size, obj.size*2, obj.size*2);
+           // Roof
+           ctx.beginPath();
+           ctx.moveTo(-obj.size - 5, -obj.size);
+           ctx.lineTo(0, -obj.size * 2);
+           ctx.lineTo(obj.size + 5, -obj.size);
+           ctx.fill();
+       }
        else if(obj.type === EntityType.TREE) {
          // Tree trunk silhouette
          ctx.fillRect(-6, -obj.size, 12, obj.size);
+         // Leaves silhouette
+         ctx.beginPath();
+         ctx.moveTo(0, -obj.size * 2.5);
+         ctx.lineTo(obj.size, -obj.size * 0.5);
+         ctx.lineTo(-obj.size, -obj.size * 0.5);
+         ctx.fill();
        }
        else { ctx.beginPath(); ctx.arc(0,0, obj.size, 0, Math.PI*2); ctx.fill(); }
        ctx.restore();
@@ -209,20 +237,33 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     const visionRadius = gameState.isNight ? VISION_RADIUS_NIGHT : VISION_RADIUS_DAY;
     const visionSourceScreenPos = { x: visionSource.pos.x - camX, y: visionSource.pos.y - camY };
 
+    // Reset smoothing if position changed dramatically (teleport/respawn) to avoid lag lines
+    if (lastSourcePosRef.current && distance(lastSourcePosRef.current, visionSource.pos) > 50) {
+        prevDistancesRef.current = null;
+    }
+    lastSourcePosRef.current = { ...visionSource.pos };
+
     // Pre-filter obstacles that are close enough to matter to save cycles
     const nearbyObstacles = allObstacles.filter(obj => 
         distance(visionSource.pos, obj.pos) < visionRadius + obj.size
     );
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(visionSourceScreenPos.x, visionSourceScreenPos.y);
+    // INCREASED RAY COUNT for high fidelity
+    const NUM_RAYS = 720; 
     
-    // INCREASED RAY COUNT AND ANALYTIC INTERSECTION
-    const numRays = 360; // Higher count for smoother edges
+    // Initialize smoothing buffer if needed
+    if (!prevDistancesRef.current || prevDistancesRef.current.length !== NUM_RAYS + 1) {
+        prevDistancesRef.current = new Float32Array(NUM_RAYS + 1).fill(visionRadius);
+    }
     
-    for (let i = 0; i <= numRays; i++) {
-       const angle = (i / numRays) * Math.PI * 2;
+    const currentDistances = prevDistancesRef.current;
+    const LERP_FACTOR = 0.3; // Lower = smoother but more lag, Higher = snappier but more jitter
+
+    // Calculate Target Distances for this frame
+    const targetDistances = new Float32Array(NUM_RAYS + 1);
+
+    for (let i = 0; i <= NUM_RAYS; i++) {
+       const angle = (i / NUM_RAYS) * Math.PI * 2;
        const dir = { x: Math.cos(angle), y: Math.sin(angle) };
        
        let closestDist = visionRadius;
@@ -244,9 +285,33 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
            closestDist = dist;
          }
        }
-       
-       ctx.lineTo(visionSourceScreenPos.x + dir.x * closestDist, visionSourceScreenPos.y + dir.y * closestDist);
+       targetDistances[i] = closestDist;
     }
+
+    // Apply Lerp and Construct Path
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(visionSourceScreenPos.x + targetDistances[0], visionSourceScreenPos.y); // Start point (approx)
+
+    for (let i = 0; i <= NUM_RAYS; i++) {
+        // LERP: Smooth transition from previous frame's distance to target distance
+        const prev = currentDistances[i];
+        const target = targetDistances[i];
+        
+        // Simple Lerp
+        const nextDist = prev + (target - prev) * LERP_FACTOR;
+        
+        // Update Ref
+        currentDistances[i] = nextDist;
+
+        const angle = (i / NUM_RAYS) * Math.PI * 2;
+        const x = visionSourceScreenPos.x + Math.cos(angle) * nextDist;
+        const y = visionSourceScreenPos.y + Math.sin(angle) * nextDist;
+        
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+
     ctx.closePath();
     ctx.clip(); // <--- MAGIC: Only draw inside this region (The Light)
     
@@ -276,16 +341,47 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     gameState.bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, 3, 0, Math.PI * 2); ctx.fill(); });
 
     ctx.restore();
+
+    // 5. Overlay Effects (Demon Tracking)
+    // Drawn outside of clip to ensure visibility if needed (though it should be local to demon)
+    // Drawing it in world space (after restore but before final return)
+    if (gameState.isNight && gameState.demon.trackingActiveTime > 0) {
+        ctx.save();
+        ctx.translate(-camX, -camY); // Back to World Space
+        ctx.translate(gameState.demon.pos.x, gameState.demon.pos.y);
+        
+        const dx = gameState.hunter.pos.x - gameState.demon.pos.x;
+        const dy = gameState.hunter.pos.y - gameState.demon.pos.y;
+        const angle = Math.atan2(dy, dx);
+        
+        ctx.rotate(angle);
+        
+        // Draw Red Arrow
+        const dist = 45; // Distance from center
+        ctx.fillStyle = '#ef4444'; 
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        
+        ctx.beginPath();
+        ctx.moveTo(dist, 0);
+        ctx.lineTo(dist - 12, -6);
+        ctx.lineTo(dist - 12, 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.restore();
+    }
     
   }, [gameState, cameraTarget]);
 
   return (
     <canvas 
       ref={canvasRef} 
-      width={VIEWPORT_WIDTH} 
-      height={VIEWPORT_HEIGHT}
-      style={{ width: '100%', height: 'auto', imageRendering: 'pixelated', maxWidth: '100%' }}
-      className="border-4 border-slate-700 rounded-lg shadow-2xl bg-black"
+      width={VIEWPORT_WIDTH * RENDER_SCALE} 
+      height={VIEWPORT_HEIGHT * RENDER_SCALE}
+      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+      className="rounded-lg shadow-2xl bg-black"
     />
   );
 };

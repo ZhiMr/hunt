@@ -1,10 +1,10 @@
-import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player } from '../types';
+import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage } from '../types';
 import { 
   MAP_SIZE, MOVE_SPEED_HUNTER, MOVE_SPEED_DEMON, MOVE_SPEED_DEER, 
   SHOOT_COOLDOWN, BULLET_SPEED, DEMON_EAT_BONUS, MAX_BULLETS,
   DAY_DURATION_TICKS, SHOOT_PENALTY_SECONDS, DAY_DURATION_SECONDS,
   TREE_COLLISION_RATIO, FPS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS,
-  DEMON_STUN_DURATION
+  DEMON_STUN_DURATION, DEMON_TRACKING_DURATION
 } from '../constants';
 
 // --- Helper Math ---
@@ -12,6 +12,11 @@ export const distance = (a: Vector2, b: Vector2) => Math.sqrt((a.x - b.x) ** 2 +
 export const normalize = (v: Vector2): Vector2 => {
   const len = Math.sqrt(v.x * v.x + v.y * v.y);
   return len === 0 ? { x: 0, y: 0 } : { x: v.x / len, y: v.y / len };
+};
+
+// Helper to add a message to state
+const addMessage = (messages: GameMessage[], text: string): GameMessage[] => {
+  return [{ id: Math.random(), text, timeLeft: 2.0 }, ...messages].slice(0, 5);
 };
 
 // Helper: Axis-Aligned Bounding Box (Square) vs Circle Collision
@@ -211,11 +216,21 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
   // Deep clone mutable entities to ensure React updates detect changes
   newState.hunter = { ...state.hunter, pos: { ...state.hunter.pos } };
   newState.demon = { ...state.demon, pos: { ...state.demon.pos } };
+  
+  // Update Message Timers
+  newState.messages = newState.messages
+      .map(m => ({ ...m, timeLeft: m.timeLeft - dt }))
+      .filter(m => m.timeLeft > 0);
 
   const obstacles = [...state.trees, state.cabin];
 
   // Scale factor for frame-based logic (defaults were tuned for 60fps)
   const frameScale = dt * FPS;
+
+  // Update Demon Tracking Timer
+  if (newState.demon.trackingActiveTime > 0) {
+      newState.demon.trackingActiveTime -= dt;
+  }
 
   // 1. Time Progression
   if (!newState.isNight) {
@@ -225,7 +240,8 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       newState.isNight = true;
       newState.timeOfDay = 1;
       newState.nightTimer = 0; // Initialize night timer
-      newState.messages = ["夜幕降临！恶魔现出了真身！", ...newState.messages.slice(0, 4)];
+      newState.demon.canTrack = true; // Enable tracking for the night
+      newState.messages = addMessage(newState.messages, "夜晚降临。快回到木屋躲避恶魔！");
     }
   } else {
     // Night Logic
@@ -238,7 +254,8 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
         newState.hunter.inCabin = false; // Kick out hunter
         newState.hunter.enterTimer = 0;
         newState.demon.stunTimer = 0; // Reset stun
-        newState.messages = ["黎明到来，恶魔重新潜伏，蘑菇已刷新。", ...newState.messages.slice(0, 4)];
+        newState.demon.canTrack = false; // Reset tracking
+        newState.messages = addMessage(newState.messages, "黎明到来，恶魔重新潜伏，蘑菇已刷新。");
         
         // Respawn Mushrooms (Scattered)
         const newMushrooms: Entity[] = [];
@@ -294,7 +311,7 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
          newState.hunter.enterTimer += dt;
          if (newState.hunter.enterTimer >= CABIN_ENTER_DURATION) {
              newState.hunter.inCabin = true;
-             newState.messages = ["猎人躲进了木屋，暂时安全了！", ...newState.messages.slice(0, 4)];
+             newState.messages = addMessage(newState.messages, "猎人躲进了木屋，暂时安全了！");
          }
      } else {
          // Immediate reset when leaving range
@@ -386,22 +403,36 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       if (newState.timeOfDay >= 1 && !newState.isNight) {
           newState.isNight = true;
           newState.nightTimer = 0;
-          newState.messages = ["枪声加速了夜幕降临！", ...newState.messages.slice(0, 4)];
+          newState.demon.canTrack = true; // Enable tracking
+          newState.messages = addMessage(newState.messages, "枪声加速了夜幕降临！");
       }
     }
     newState.hunter.cooldown = SHOOT_COOLDOWN;
   }
 
-  // 5. Demon Actions (Eat Mushroom)
+  // 5. Demon Actions (Eat Mushroom & Tracking)
   if (demonInput.action && newState.demon.stunTimer <= 0) {
-    const eatRange = 40;
-    const mushroomIndex = newState.mushrooms.findIndex(m => distance(m.pos, newState.demon.pos) < eatRange);
-    if (mushroomIndex !== -1) {
-      newState.mushrooms.splice(mushroomIndex, 1);
-      if (!newState.isNight) {
-         newState.timeOfDay += DEMON_EAT_BONUS;
-         newState.messages = ["咔嚓！好像有蘑菇被吃掉了...", ...newState.messages.slice(0, 4)];
-      }
+    let actionUsed = false;
+
+    // Tracking (Priority at Night)
+    if (newState.isNight && newState.demon.canTrack) {
+        newState.demon.canTrack = false;
+        newState.demon.trackingActiveTime = DEMON_TRACKING_DURATION;
+        newState.messages = addMessage(newState.messages, "恶魔感知到了猎人的方位！");
+        actionUsed = true;
+    }
+
+    if (!actionUsed) {
+        // Eating Mushroom
+        const eatRange = 40;
+        const mushroomIndex = newState.mushrooms.findIndex(m => distance(m.pos, newState.demon.pos) < eatRange);
+        if (mushroomIndex !== -1) {
+          newState.mushrooms.splice(mushroomIndex, 1);
+          if (!newState.isNight) {
+             newState.timeOfDay += DEMON_EAT_BONUS;
+             newState.messages = addMessage(newState.messages, "咔嚓！好像有蘑菇被吃掉了...");
+          }
+        }
     }
   }
 
@@ -431,7 +462,7 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       if (newState.isNight) {
           // Night logic: Stun instead of kill
           newState.demon.stunTimer = DEMON_STUN_DURATION;
-          newState.messages = ["恶魔被击晕了！", ...newState.messages.slice(0, 4)];
+          newState.messages = addMessage(newState.messages, "恶魔被击晕了！");
           return false; // Remove bullet
       } else {
           // Day logic: Hunter Wins
@@ -499,7 +530,6 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
          nextPos = deer.pos;
        }
     } 
-    // Removed the else block where random turning while standing was happening
     
     return { ...deer, pos: nextPos, aiState: newAi };
   });

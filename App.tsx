@@ -152,7 +152,9 @@ const createInitialState = (): GameState => {
       energy: 0,
       isRevealed: false,
       cooldown: 0,
-      stunTimer: 0
+      stunTimer: 0,
+      trackingActiveTime: 0,
+      canTrack: false
     },
     deers,
     trees,
@@ -162,7 +164,7 @@ const createInitialState = (): GameState => {
     mapWidth: MAP_SIZE,
     mapHeight: MAP_SIZE,
     lastShotTime: 0,
-    messages: ["欢迎来到森林。猎人 vs 恶魔。"]
+    messages: [{ id: Date.now(), text: "欢迎来到森林。猎人 vs 恶魔。", timeLeft: 3.0 }]
   };
 };
 
@@ -305,7 +307,7 @@ const App: React.FC = () => {
     if (!joinId) return;
     const peer = new Peer();
     
-    peer.on('open', () => {
+    peer.on('open', (id) => {
       const conn = peer.connect(joinId);
       conn.on('open', () => {
         console.log("Connected to: " + joinId);
@@ -500,15 +502,16 @@ const App: React.FC = () => {
                       <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">2. 昼夜机制</h3>
                       <ul className="list-disc list-inside space-y-2 text-sm">
                           <li><span className="text-yellow-400 font-bold">白天 (180秒)</span>: 猎人视野开阔。恶魔伪装成无害的鹿。猎人开枪会受到“时间惩罚”，加速入夜。</li>
-                          <li><span className="text-red-500 font-bold">夜晚 (40秒)</span>: 恶魔现出原形，视野变小但速度极快。猎人无法在夜晚彻底杀死恶魔，只能将其<strong>击晕2秒</strong>。</li>
+                          <li><span className="text-red-500 font-bold">夜晚 (40秒)</span>: 恶魔现出原形，视野变小但速度极快。猎人无法在夜晚彻底杀死恶魔，只能将其<strong>击晕0.5秒</strong>。</li>
                       </ul>
                   </section>
 
                   <section>
-                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">3. 关键道具</h3>
+                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">3. 关键道具 & 技能</h3>
                       <ul className="list-disc list-inside space-y-2 text-sm">
                           <li><strong>木屋</strong>: 地图中央的安全区。猎人在门前停留5秒可进入，进入后夜晚无敌。</li>
                           <li><strong>蘑菇</strong>: 散落在地图各处。恶魔吃掉蘑菇会显著加速时间流逝（加速入夜）。</li>
+                          <li><span className="text-purple-400 font-bold">恶魔追踪</span>: 夜晚时，恶魔可以使用一次交互键来感知猎人的方位（显示红色箭头）。</li>
                       </ul>
                   </section>
               </div>
@@ -609,7 +612,7 @@ const App: React.FC = () => {
                        setMyRole(role);
                        // If Single Player, reset opponent mode if needed or keep it
                        if (gameMode === GameMode.SINGLE_PLAYER) {
-                           setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
+                           setOpponentMode(opponentMode === 'COMPUTER' : 'COMPUTER' : 'WAITING');
                        }
                    }
                 }}
@@ -648,7 +651,7 @@ const App: React.FC = () => {
     };
 
     return (
-        <div className="bg-neutral-800 p-4 md:p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center relative">
+        <div className="bg-neutral-800 p-4 md:p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center relative my-auto">
             <h2 className="text-2xl md:text-3xl font-bold text-stone-200 mb-6 flex items-center gap-3">
                 <Users /> 选择角色
             </h2>
@@ -722,9 +725,7 @@ const App: React.FC = () => {
   const isPlaying = gameState.phase === GamePhase.PLAYING;
 
   return (
-    <div className={`min-h-screen bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden
-        ${isPlaying ? 'justify-start pt-2 md:justify-center md:pt-0' : 'justify-center'}
-    `}>
+    <div className={`h-[100dvh] w-full bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden relative`}>
       
       {showRules && renderRules()}
       
@@ -740,60 +741,62 @@ const App: React.FC = () => {
       {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
         <button 
             onClick={() => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }))}
-            className="fixed top-6 left-6 z-50 bg-neutral-800/90 hover:bg-red-900/90 text-stone-400 hover:text-white border border-neutral-600 hover:border-red-500 rounded-lg px-4 py-2 flex items-center gap-2 transition-all shadow-xl backdrop-blur-sm font-bold"
+            className="fixed top-4 left-4 z-50 bg-neutral-800/80 hover:bg-red-900/90 text-stone-400 hover:text-white border border-neutral-600 hover:border-red-500 rounded-lg px-3 py-2 flex items-center gap-2 transition-all shadow-xl backdrop-blur-sm font-bold text-sm"
         >
-            <LogOut size={18} />
+            <LogOut size={16} />
             <span className="hidden md:inline">退出</span>
         </button>
       )}
 
-      {/* COMPACT HUD Header for Mobile - Only show in Game */}
+      {/* COMPACT HUD Header for Mobile - Overlay on Canvas */}
       {gameState.phase === GamePhase.PLAYING && (
-          <div className="w-full max-w-4xl flex flex-row justify-between items-center mb-1 px-2 py-0.5 bg-neutral-800/90 rounded-xl shadow-lg border border-neutral-700 gap-1 relative z-10 mx-auto mt-1 md:mt-4 backdrop-blur-md">
-            {/* Hunter Info */}
-            <div className={`flex items-center gap-2 p-1 px-2 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-              <div className="flex flex-col">
-                <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
-                <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
-                  <Gamepad2 size={14} className="md:w-5 md:h-5" />
-                  <span>∞</span>
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
+             <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
+                {/* Hunter Info */}
+                <div className={`flex items-center gap-2 p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
+                    <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
+                    <Gamepad2 size={14} className="md:w-5 md:h-5" />
+                    <span>∞</span>
+                    </div>
                 </div>
-              </div>
-            </div>
-
-            {/* Time Bar */}
-            <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
-              <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none">
-                {gameState.isNight ? "存活" : "入夜"}
-              </span>
-              <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700 rounded-full overflow-hidden border border-neutral-600 relative">
-                 <div 
-                  className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-900' : 'bg-yellow-500'}`}
-                  style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
-                />
-              </div>
-              <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
-                 {gameState.isNight 
-                    ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
-                    : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
-                 }
-              </span>
-            </div>
-
-            {/* Demon Info */}
-            <div className={`flex items-center gap-2 text-right p-1 px-2 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-              <div className="flex flex-col items-end">
-                <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
-                <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
-                   <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
-                   <Skull size={14} className="md:w-5 md:h-5" />
                 </div>
-              </div>
-            </div>
+
+                {/* Time Bar */}
+                <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
+                <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none font-bold text-shadow">
+                    {gameState.isNight ? "存活" : "入夜"}
+                </span>
+                <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700/50 rounded-full overflow-hidden border border-white/10 relative">
+                    <div 
+                    className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-600' : 'bg-yellow-500'}`}
+                    style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
+                    />
+                </div>
+                <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
+                    {gameState.isNight 
+                        ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
+                        : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
+                    }
+                </span>
+                </div>
+
+                {/* Demon Info */}
+                <div className={`flex items-center gap-2 text-right p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
+                <div className="flex flex-col items-end">
+                    <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
+                    <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
+                    <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
+                    <Skull size={14} className="md:w-5 md:h-5" />
+                    </div>
+                </div>
+                </div>
+             </div>
             
             {/* Cabin Entry Progress Overlay - Moved to be part of canvas or screen UI */}
             {gameState.hunter.enterTimer > 0 && !gameState.hunter.inCabin && (
-                <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-neutral-900/90 px-3 py-1 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50 shadow-xl backdrop-blur">
+                <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-neutral-900/90 px-3 py-1 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50 shadow-xl backdrop-blur">
                     <span className="text-[10px] flex items-center gap-1 font-bold animate-pulse whitespace-nowrap">
                         <LockKeyhole size={10}/> 开锁中... {Math.floor((gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%
                     </span>
@@ -806,7 +809,7 @@ const App: React.FC = () => {
                 </div>
             )}
              {gameState.hunter.inCabin && (
-                <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-green-900/90 px-3 py-1 rounded border border-green-500 text-green-300 flex items-center gap-2 z-50 shadow-xl">
+                <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-green-900/90 px-3 py-1 rounded border border-green-500 text-green-300 flex items-center gap-2 z-50 shadow-xl">
                     <Check size={12}/>
                     <span className="text-[10px] font-bold whitespace-nowrap">已躲入屋内</span>
                 </div>
@@ -814,45 +817,55 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* Main Content Area */}
-      <div className={`relative w-full flex flex-col items-center justify-start ${gameState.phase === GamePhase.PLAYING ? 'px-1' : 'px-4'}`}>
-        {gameState.phase === GamePhase.MENU && renderMenu()}
-        {gameState.phase === GamePhase.LOBBY && renderLobby()}
+      {/* Main Content Area - Fullscreen Centered */}
+      <div className={`w-full h-full flex items-center justify-center overflow-y-auto ${gameState.phase !== GamePhase.PLAYING ? 'py-8' : ''}`}>
         
-        {/* Game Canvas & Overlays */}
+        {/* Menu & Lobby Container */}
+        {(gameState.phase === GamePhase.MENU || gameState.phase === GamePhase.LOBBY) && (
+            <div className="w-full max-w-4xl mx-auto flex flex-col items-center justify-center min-h-full">
+                {gameState.phase === GamePhase.MENU && renderMenu()}
+                {gameState.phase === GamePhase.LOBBY && renderLobby()}
+            </div>
+        )}
+        
+        {/* Game Canvas & Overlays - Maximize Screen */}
         {(gameState.phase === GamePhase.PLAYING || 
           gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS || 
           gameState.phase === GamePhase.GAME_OVER_DEMON_WINS) && (
-            <div className="relative w-full max-w-[800px] aspect-[4/3]">
-                <GameCanvas gameState={gameState} cameraTarget={cameraTarget} />
-                
-                {gameState.phase !== GamePhase.PLAYING && (
-                  <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-10 backdrop-blur-sm px-8 text-center">
-                    <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
-                      游戏结束
-                    </h1>
-                    <p className="text-md md:text-xl text-stone-300 mb-8 max-w-lg">
-                      {gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS && <span className="text-green-400">猎人净化了森林中的邪恶！</span>}
-                      {gameState.phase === GamePhase.GAME_OVER_DEMON_WINS && <span className="text-red-500">森林吞噬了又一个灵魂...</span>}
-                    </p>
+            <div className="relative w-full h-full flex items-center justify-center">
+                {/* Canvas Container that fits 4:3 ratio inside available space */}
+                <div className="relative aspect-[4/3] h-full w-auto max-w-full max-h-full shadow-2xl flex items-center justify-center">
+                    <GameCanvas gameState={gameState} cameraTarget={cameraTarget} />
                     
-                    <button 
-                      onClick={() => setGameState(prev => ({...prev, phase: GamePhase.LOBBY}))}
-                      className="flex items-center gap-2 px-8 py-3 bg-stone-100 text-neutral-900 font-bold rounded hover:bg-white hover:scale-105 transition-all mb-8"
-                    >
-                      <RefreshCw size={20} /> 返回大厅
-                    </button>
-                  </div>
-                )}
+                    {/* Game Over Overlay */}
+                    {gameState.phase !== GamePhase.PLAYING && (
+                    <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-30 backdrop-blur-sm px-8 text-center border-2 border-stone-800">
+                        <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
+                        游戏结束
+                        </h1>
+                        <p className="text-md md:text-xl text-stone-300 mb-8 max-w-lg">
+                        {gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS && <span className="text-green-400">猎人净化了森林中的邪恶！</span>}
+                        {gameState.phase === GamePhase.GAME_OVER_DEMON_WINS && <span className="text-red-500">森林吞噬了又一个灵魂...</span>}
+                        </p>
+                        
+                        <button 
+                        onClick={() => setGameState(prev => ({...prev, phase: GamePhase.LOBBY}))}
+                        className="flex items-center gap-2 px-8 py-3 bg-stone-100 text-neutral-900 font-bold rounded hover:bg-white hover:scale-105 transition-all mb-8 pointer-events-auto"
+                        >
+                        <RefreshCw size={20} /> 返回大厅
+                        </button>
+                    </div>
+                    )}
+                </div>
             </div>
         )}
 
-        {/* Event Log - BELOW Canvas */}
+        {/* Event Log - FIXED POSITION */}
         {gameState.phase === GamePhase.PLAYING && (
-            <div className="w-full max-w-4xl mt-1 flex flex-col items-center z-0 px-2 pointer-events-none">
-                {gameState.messages.slice(0, 3).map((msg, i) => (
-                    <p key={i} className="text-[10px] md:text-sm text-stone-300 mb-1 text-shadow-sm text-center bg-black/50 px-2 py-0.5 rounded border border-white/5 animate-in fade-in slide-in-from-top-1">
-                        {msg}
+            <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center z-20 px-4 w-full pointer-events-none gap-1">
+                {gameState.messages.slice(0, 3).map((msg) => (
+                    <p key={msg.id} className="text-xs md:text-base text-stone-100 text-shadow-md text-center bg-black/60 px-3 py-1 rounded-full border border-white/10 animate-in fade-in slide-in-from-bottom-2 backdrop-blur-sm transition-opacity duration-300">
+                        {msg.text}
                     </p>
                 ))}
             </div>
