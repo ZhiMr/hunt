@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import GameCanvas from './components/GameCanvas';
+import { MobileControls } from './components/MobileControls';
 import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput, NetworkMessage } from './types';
 import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
 import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Eye, Users, Monitor, Link, ArrowRight, Copy, Check, Info, Trees, LockKeyhole, User, UserPlus, Cpu, LogOut } from 'lucide-react';
+import { Gamepad2, Skull, Play, RefreshCw, Eye, Users, Monitor, Link, ArrowRight, Copy, Check, Info, Trees, LockKeyhole, User, UserPlus, Cpu, LogOut, BookOpen, X } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
 // --- Initial State Factory ---
@@ -178,6 +179,8 @@ const App: React.FC = () => {
   const [joinId, setJoinId] = useState<string>("");
   const [gameMode, setGameMode] = useState<GameMode>(GameMode.SINGLE_PLAYER);
   const [isCopied, setIsCopied] = useState(false);
+  const [showRules, setShowRules] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   
   // New Role & Opponent State
   const [myRole, setMyRole] = useState<EntityType>(EntityType.HUNTER);
@@ -208,6 +211,23 @@ const App: React.FC = () => {
       if (peerRef.current) peerRef.current.destroy();
     };
   }, []);
+
+  // Detect Mobile
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile('ontouchstart' in window || navigator.maxTouchPoints > 0 || window.innerWidth < 768);
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  // Sync Host Role to Client in Lobby
+  useEffect(() => {
+      if (gameMode === GameMode.ONLINE_HOST && connRef.current && opponentMode === 'CONNECTED') {
+          connRef.current.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
+      }
+  }, [myRole, gameMode, opponentMode]);
 
   // Keyboard Listeners
   useEffect(() => {
@@ -266,8 +286,10 @@ const App: React.FC = () => {
       conn.on('open', () => {
         setOpponentMode('CONNECTED');
         connRef.current = conn;
-        // Notify client they are joined
+        // Notify client they are joined and sync initial role
         conn.send({ type: 'PLAYER_JOINED', role: PlayerRole.CLIENT });
+        // Also send current host role so client can update lobby UI
+        // We do this via LOBBY_UPDATE in the useEffect, but good to trigger here if needed
       });
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
@@ -290,18 +312,25 @@ const App: React.FC = () => {
         setRoomId(joinId);
         setGameMode(GameMode.ONLINE_CLIENT);
         isHostRef.current = false;
-        // Assume Host is Hunter by default for now, or just let client see what they are given
-        // Actually, let's just allow client to be whatever host is NOT
-        // But for sync simplicity, we don't fully sync lobby state yet
-        // Client just waits for game start state
+        
+        // Default client to opposite of default host (Demon), but will be updated via LOBBY_UPDATE
+        setMyRole(EntityType.DEMON); 
+        
         setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }));
         setOpponentMode('CONNECTED');
         connRef.current = conn;
       });
 
       conn.on('data', (data: any) => {
+        if (data.type === 'LOBBY_UPDATE') {
+            // Host changed role, so Client takes the opposite
+            setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
+        }
         if (data.type === 'START_GAME') {
-             // Host sends game start signal
+             // Host sends game start signal with assigned role
+             if (data.clientRole) {
+                 setMyRole(data.clientRole);
+             }
         }
         if (data.type === 'STATE_UPDATE') {
             setGameState(data.state);
@@ -314,7 +343,9 @@ const App: React.FC = () => {
 
   const startGame = () => {
     if (connRef.current && isHostRef.current) {
-        connRef.current.send({ type: 'START_GAME' });
+        // Host determines roles: Host is 'myRole', Client is opposite
+        const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
+        connRef.current.send({ type: 'START_GAME', clientRole });
     }
 
     const newState = createInitialState();
@@ -434,10 +465,61 @@ const App: React.FC = () => {
     setTimeout(() => setIsCopied(false), 2000);
   };
 
+  const renderRules = () => (
+      <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
+              <button 
+                  onClick={() => setShowRules(false)}
+                  className="absolute top-4 right-4 text-stone-400 hover:text-white"
+              >
+                  <X size={24} />
+              </button>
+              
+              <h2 className="text-3xl font-bold text-green-400 mb-6 flex items-center gap-2">
+                  <BookOpen /> 游戏规则
+              </h2>
+
+              <div className="space-y-6 text-stone-300">
+                  <section>
+                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">1. 角色目标</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="bg-red-900/20 p-4 rounded border border-red-900/50">
+                              <h4 className="font-bold text-red-400 mb-1 flex items-center gap-2"><Gamepad2 size={16}/> 猎人</h4>
+                              <p className="text-sm">在<strong>白天</strong>辨认并射杀伪装的恶魔。</p>
+                              <p className="text-sm mt-2">如果在夜晚存活到黎明（180秒+40秒），猎人获胜。</p>
+                          </div>
+                          <div className="bg-purple-900/20 p-4 rounded border border-purple-900/50">
+                              <h4 className="font-bold text-purple-400 mb-1 flex items-center gap-2"><Skull size={16}/> 恶魔</h4>
+                              <p className="text-sm">在<strong>夜晚</strong>现出真身并击杀猎人。</p>
+                              <p className="text-sm mt-2">吞噬蘑菇可以加速夜晚降临。</p>
+                          </div>
+                      </div>
+                  </section>
+
+                  <section>
+                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">2. 昼夜机制</h3>
+                      <ul className="list-disc list-inside space-y-2 text-sm">
+                          <li><span className="text-yellow-400 font-bold">白天 (180秒)</span>: 猎人视野开阔。恶魔伪装成无害的鹿。猎人开枪会受到“时间惩罚”，加速入夜。</li>
+                          <li><span className="text-red-500 font-bold">夜晚 (40秒)</span>: 恶魔现出原形，视野变小但速度极快。猎人无法在夜晚彻底杀死恶魔，只能将其<strong>击晕2秒</strong>。</li>
+                      </ul>
+                  </section>
+
+                  <section>
+                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">3. 关键道具</h3>
+                      <ul className="list-disc list-inside space-y-2 text-sm">
+                          <li><strong>木屋</strong>: 地图中央的安全区。猎人在门前停留5秒可进入，进入后夜晚无敌。</li>
+                          <li><strong>蘑菇</strong>: 散落在地图各处。恶魔吃掉蘑菇会显著加速时间流逝（加速入夜）。</li>
+                      </ul>
+                  </section>
+              </div>
+          </div>
+      </div>
+  );
+
   // --- RENDER ---
   const renderMenu = () => (
     <div className="flex flex-col gap-4 items-center">
-      <h1 className="text-5xl font-bold text-green-400 mb-8 tracking-tighter">FOREST WHISPERS</h1>
+      <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
       
       <button 
         onClick={() => {
@@ -512,27 +594,31 @@ const App: React.FC = () => {
 
         const canAddCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode !== 'COMPUTER';
         const canRemoveCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'COMPUTER';
+        
+        // Host (or Single Player) can switch roles by clicking the OTHER card
+        const canSwitchRole = (gameMode === GameMode.SINGLE_PLAYER || gameMode === GameMode.ONLINE_HOST) && !isMyRole;
 
         return (
             <div 
-                className={`relative flex flex-col items-center justify-center p-6 w-48 h-64 border-2 rounded-xl transition-all
+                className={`relative flex flex-col items-center justify-center p-4 w-40 h-56 md:w-48 md:h-64 border-2 rounded-xl transition-all
                     ${isMyRole ? 'border-green-500 bg-green-900/20' : 'border-stone-700 bg-stone-800/50'}
-                    ${!isMyRole && !isConnected && !isCpu && gameMode === GameMode.SINGLE_PLAYER ? 'cursor-pointer hover:border-stone-500' : ''}
+                    ${canSwitchRole ? 'cursor-pointer hover:border-stone-500 hover:scale-105' : ''}
                 `}
                 onClick={() => {
-                   // Allow switching role if Single Player
-                   if (gameMode === GameMode.SINGLE_PLAYER && !isMyRole) {
+                   if (canSwitchRole) {
                        setMyRole(role);
-                       // Reset opponent mode when switching to avoid logic conflicts for now
-                       setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
+                       // If Single Player, reset opponent mode if needed or keep it
+                       if (gameMode === GameMode.SINGLE_PLAYER) {
+                           setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
+                       }
                    }
                 }}
             >
                 <div className={`mb-4 p-4 rounded-full ${role === EntityType.HUNTER ? 'bg-red-500/20 text-red-500' : 'bg-purple-500/20 text-purple-500'}`}>
                     {role === EntityType.HUNTER ? <Gamepad2 size={48}/> : <Skull size={48}/>}
                 </div>
-                <h3 className="text-xl font-bold uppercase mb-2">{role === EntityType.HUNTER ? '猎人' : '恶魔'}</h3>
-                <span className={`text-sm font-bold ${statusColor}`}>{statusText}</span>
+                <h3 className="text-lg md:text-xl font-bold uppercase mb-2">{role === EntityType.HUNTER ? '猎人' : '恶魔'}</h3>
+                <span className={`text-xs md:text-sm font-bold ${statusColor}`}>{statusText}</span>
 
                 {/* Add/Remove CPU Button Overlay */}
                 {canAddCpu && (
@@ -543,7 +629,7 @@ const App: React.FC = () => {
                             setOpponentMode('COMPUTER');
                         }}
                     >
-                        <UserPlus size={14}/> 添加电脑
+                        <UserPlus size={14}/> <span className="hidden md:inline">电脑</span>
                     </button>
                 )}
                 {canRemoveCpu && (
@@ -554,7 +640,7 @@ const App: React.FC = () => {
                             setOpponentMode('WAITING');
                         }}
                     >
-                        <User size={14}/> 移除电脑
+                        <User size={14}/> <span className="hidden md:inline">移除</span>
                     </button>
                 )}
             </div>
@@ -562,16 +648,23 @@ const App: React.FC = () => {
     };
 
     return (
-        <div className="bg-neutral-800 p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center">
-            <h2 className="text-3xl font-bold text-stone-200 mb-8 flex items-center gap-3">
+        <div className="bg-neutral-800 p-4 md:p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center relative">
+            <h2 className="text-2xl md:text-3xl font-bold text-stone-200 mb-6 flex items-center gap-3">
                 <Users /> 选择角色
             </h2>
 
+            <button 
+                onClick={() => setShowRules(true)}
+                className="absolute top-4 right-4 md:top-8 md:right-8 text-stone-400 hover:text-green-400 flex items-center gap-2 transition"
+            >
+                <BookOpen size={20} /> <span className="hidden sm:inline">规则</span>
+            </button>
+
             {/* Room Info */}
             {gameMode === GameMode.ONLINE_HOST && (
-                <div className="mb-8 px-6 py-3 bg-neutral-900 rounded border border-neutral-600 flex items-center gap-4">
-                    <span className="text-stone-400 text-sm">房间邀请码</span>
-                    <span className="text-2xl text-green-400 font-mono font-bold tracking-widest">{roomId}</span>
+                <div className="mb-6 px-4 py-2 bg-neutral-900 rounded border border-neutral-600 flex items-center gap-4">
+                    <span className="text-stone-400 text-xs md:text-sm">房间号</span>
+                    <span className="text-xl md:text-2xl text-green-400 font-mono font-bold tracking-widest">{roomId}</span>
                     <button onClick={handleCopy} className="p-2 hover:bg-white/10 rounded transition">
                         {isCopied ? <Check size={18} className="text-green-500"/> : <Copy size={18} className="text-stone-400"/>}
                     </button>
@@ -579,7 +672,7 @@ const App: React.FC = () => {
             )}
 
             {/* Role Cards */}
-            <div className="flex flex-col md:flex-row gap-8 mb-10">
+            <div className="flex flex-row gap-4 md:gap-8 mb-8">
                 {renderCard(EntityType.HUNTER)}
                 <div className="hidden md:flex items-center text-stone-600 font-bold text-xl">VS</div>
                 {renderCard(EntityType.DEMON)}
@@ -616,7 +709,7 @@ const App: React.FC = () => {
                 </p>
             )}
             {gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'WAITING' && (
-                <p className="text-sm text-stone-500 mt-4 flex items-center gap-2">
+                <p className="text-xs md:text-sm text-stone-500 mt-4 flex items-center gap-2 text-center">
                     <Info size={16}/> 提示：如果不添加电脑，将只有你一个人在地图上
                 </p>
             )}
@@ -624,39 +717,23 @@ const App: React.FC = () => {
     );
   };
 
-  const cameraTarget = gameMode === GameMode.ONLINE_CLIENT 
-      ? (myRole === EntityType.HUNTER ? 'DEMON' : 'DEMON') // If client is demon, follow demon. Wait, client role isn't explicitly set in sync yet.
-      // Actually, for simplicity, Client is usually P2. 
-      // If Host chose Hunter, Client is Demon. If Host chose Demon, Client is Hunter.
-      // But we haven't synced Host Choice to Client fully in lobby.
-      // FIX: For Online Client, we rely on the state sent by Host, but local `myRole` might be wrong if not synced.
-      // Let's assume for Online Client, we check what the Host ISN'T?
-      // Simplified: Camera target follows `myRole`.
-      : (myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON');
-
-  // Fix for Online Client Camera:
-  // If we are client, we are usually "Not the host". 
-  // But let's just stick to "myRole" which we should ideally sync.
-  // For this simplified version: 
-  // If I am Client, and I haven't picked a role (lobby skipped for client mostly), 
-  // I should default to Demon? The JoinGame logic sets OpponentMode CONNECTED but doesn't set myRole.
-  // Let's just default Client to Demon for now as per original design, OR improve sync.
-  // Original design: Host = Hunter, Client = Demon.
-  // New design: Host picks.
-  // Quick fix: Just use 'DEMON' for client default if not set? 
-  // Let's rely on `myRole`. In `renderMenu` -> `joinGame` -> we should set myRole?
-  // Let's just set Client to always view DEMON if they are Demon, etc.
-  // Since we didn't add logic to sync "Host selected Hunter" to "Client becomes Demon", 
-  // Client might be desynced in UI roles.
-  // For safety in this iteration: If Online Client, default to Demon.
-  const finalCameraTarget = gameMode === GameMode.ONLINE_CLIENT ? 'DEMON' : (myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON');
-
+  const cameraTarget = myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON';
 
   return (
-    <div className="min-h-screen bg-neutral-900 text-stone-200 flex flex-col items-center justify-center font-mono">
+    <div className="min-h-screen bg-neutral-900 text-stone-200 flex flex-col items-center justify-start pt-2 md:justify-center md:pt-0 font-mono overflow-hidden">
       
-      {/* Exit Button - Single Player Only */}
-      {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && (
+      {showRules && renderRules()}
+      
+      {/* Mobile Controls Overlay */}
+      {isMobile && gameState.phase === GamePhase.PLAYING && (
+         <MobileControls 
+             inputRef={inputRef} 
+             onExit={gameMode === GameMode.SINGLE_PLAYER ? () => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY })) : undefined}
+         />
+      )}
+
+      {/* Exit Button - Desktop Only */}
+      {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
         <button 
             onClick={() => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }))}
             className="fixed top-6 left-6 z-50 bg-neutral-800/90 hover:bg-red-900/90 text-stone-400 hover:text-white border border-neutral-600 hover:border-red-500 rounded-lg px-4 py-2 flex items-center gap-2 transition-all shadow-xl backdrop-blur-sm font-bold"
@@ -666,30 +743,32 @@ const App: React.FC = () => {
         </button>
       )}
 
-      {/* HUD Header - Only show in Game */}
+      {/* COMPACT HUD Header for Mobile - Only show in Game */}
       {gameState.phase === GamePhase.PLAYING && (
-          <div className="w-full max-w-4xl flex flex-col md:flex-row justify-between items-center mb-4 px-4 py-2 bg-neutral-800 rounded-lg shadow-lg border border-neutral-700 gap-4 relative">
-            <div className={`flex items-center gap-4 p-2 rounded ${finalCameraTarget === 'HUNTER' ? 'bg-white/10' : ''}`}>
+          <div className="w-full max-w-4xl flex flex-row justify-between items-center mb-1 px-2 py-0.5 bg-neutral-800/90 rounded-xl shadow-lg border border-neutral-700 gap-1 relative z-10 mx-auto mt-1 md:mt-4 backdrop-blur-md">
+            {/* Hunter Info */}
+            <div className={`flex items-center gap-2 p-1 px-2 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
               <div className="flex flex-col">
-                <span className="text-xs text-stone-400">猎人</span>
-                <div className="flex items-center gap-1 text-red-400 font-bold">
-                  <Gamepad2 size={18} />
-                  <span>子弹: ∞</span>
+                <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
+                <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
+                  <Gamepad2 size={14} className="md:w-5 md:h-5" />
+                  <span>∞</span>
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-col items-center">
-              <span className="text-xs text-stone-400 mb-1">
-                {gameState.isNight ? "存活至黎明" : "距离入夜"}
+            {/* Time Bar */}
+            <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
+              <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none">
+                {gameState.isNight ? "存活" : "入夜"}
               </span>
-              <div className="w-64 h-3 bg-neutral-700 rounded-full overflow-hidden border border-neutral-600 relative">
+              <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700 rounded-full overflow-hidden border border-neutral-600 relative">
                  <div 
                   className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-900' : 'bg-yellow-500'}`}
                   style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
                 />
               </div>
-              <span className="text-xs text-stone-300 mt-1 font-mono">
+              <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
                  {gameState.isNight 
                     ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
                     : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
@@ -697,23 +776,24 @@ const App: React.FC = () => {
               </span>
             </div>
 
-            <div className={`flex items-center gap-4 text-right p-2 rounded ${finalCameraTarget === 'DEMON' ? 'bg-white/10' : ''}`}>
+            {/* Demon Info */}
+            <div className={`flex items-center gap-2 text-right p-1 px-2 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
               <div className="flex flex-col items-end">
-                <span className="text-xs text-stone-400">恶魔</span>
-                <div className="flex items-center gap-1 text-purple-400 font-bold">
-                   <span>{gameState.isNight ? "猎杀中" : "伪装中"}</span>
-                   <Skull size={18} />
+                <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
+                <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
+                   <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
+                   <Skull size={14} className="md:w-5 md:h-5" />
                 </div>
               </div>
             </div>
             
-            {/* Cabin Entry Progress Overlay */}
+            {/* Cabin Entry Progress Overlay - Moved to be part of canvas or screen UI */}
             {gameState.hunter.enterTimer > 0 && !gameState.hunter.inCabin && (
-                <div className="absolute -bottom-16 left-1/2 -translate-x-1/2 bg-neutral-900 px-4 py-2 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50">
-                    <span className="text-xs flex items-center gap-1 font-bold animate-pulse">
-                        <LockKeyhole size={14}/> 正在打开门锁... {Math.floor((gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%
+                <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-neutral-900/90 px-3 py-1 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50 shadow-xl backdrop-blur">
+                    <span className="text-[10px] flex items-center gap-1 font-bold animate-pulse whitespace-nowrap">
+                        <LockKeyhole size={10}/> 开锁中... {Math.floor((gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%
                     </span>
-                    <div className="w-32 h-2 bg-neutral-800 rounded-full overflow-hidden">
+                    <div className="w-24 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
                         <div 
                            className="h-full bg-yellow-500"
                            style={{ width: `${Math.min(100, (gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%` }}
@@ -722,16 +802,16 @@ const App: React.FC = () => {
                 </div>
             )}
              {gameState.hunter.inCabin && (
-                <div className="absolute -bottom-12 left-1/2 -translate-x-1/2 bg-green-900/80 px-4 py-2 rounded border border-green-500 text-green-300 flex items-center gap-2 z-50">
-                    <Check size={16}/>
-                    <span className="text-xs font-bold">已躲入屋内，安全！</span>
+                <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-green-900/90 px-3 py-1 rounded border border-green-500 text-green-300 flex items-center gap-2 z-50 shadow-xl">
+                    <Check size={12}/>
+                    <span className="text-[10px] font-bold whitespace-nowrap">已躲入屋内</span>
                 </div>
             )}
           </div>
       )}
 
       {/* Main Content Area */}
-      <div className="relative">
+      <div className={`relative w-full flex flex-col items-center justify-start ${gameState.phase === GamePhase.PLAYING ? 'px-1' : 'px-4'}`}>
         {gameState.phase === GamePhase.MENU && renderMenu()}
         {gameState.phase === GamePhase.LOBBY && renderLobby()}
         
@@ -739,15 +819,15 @@ const App: React.FC = () => {
         {(gameState.phase === GamePhase.PLAYING || 
           gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS || 
           gameState.phase === GamePhase.GAME_OVER_DEMON_WINS) && (
-            <>
-                <GameCanvas gameState={gameState} cameraTarget={finalCameraTarget} />
+            <div className="relative w-full max-w-[800px] aspect-[4/3]">
+                <GameCanvas gameState={gameState} cameraTarget={cameraTarget} />
                 
                 {gameState.phase !== GamePhase.PLAYING && (
                   <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-10 backdrop-blur-sm px-8 text-center">
-                    <h1 className="text-4xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
+                    <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
                       游戏结束
                     </h1>
-                    <p className="text-lg md:text-xl text-stone-300 mb-8 max-w-lg">
+                    <p className="text-md md:text-xl text-stone-300 mb-8 max-w-lg">
                       {gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS && <span className="text-green-400">猎人净化了森林中的邪恶！</span>}
                       {gameState.phase === GamePhase.GAME_OVER_DEMON_WINS && <span className="text-red-500">森林吞噬了又一个灵魂...</span>}
                     </p>
@@ -760,18 +840,20 @@ const App: React.FC = () => {
                     </button>
                   </div>
                 )}
-            </>
+            </div>
+        )}
+
+        {/* Event Log - BELOW Canvas */}
+        {gameState.phase === GamePhase.PLAYING && (
+            <div className="w-full max-w-4xl mt-1 flex flex-col items-center z-0 px-2 pointer-events-none">
+                {gameState.messages.slice(0, 3).map((msg, i) => (
+                    <p key={i} className="text-[10px] md:text-sm text-stone-300 mb-1 text-shadow-sm text-center bg-black/50 px-2 py-0.5 rounded border border-white/5 animate-in fade-in slide-in-from-top-1">
+                        {msg}
+                    </p>
+                ))}
+            </div>
         )}
       </div>
-
-      {/* Event Log */}
-      {gameState.phase === GamePhase.PLAYING && (
-          <div className="w-full max-w-4xl mt-4 h-24 overflow-hidden flex flex-col-reverse items-center opacity-70 pointer-events-none">
-            {gameState.messages.map((msg, i) => (
-              <p key={i} className="text-sm text-stone-300 mb-1 text-shadow-sm">{msg}</p>
-            ))}
-          </div>
-      )}
 
     </div>
   );

@@ -284,6 +284,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
       ref={canvasRef} 
       width={VIEWPORT_WIDTH} 
       height={VIEWPORT_HEIGHT}
+      style={{ width: '100%', height: 'auto', imageRendering: 'pixelated', maxWidth: '100%' }}
       className="border-4 border-slate-700 rounded-lg shadow-2xl bg-black"
     />
   );

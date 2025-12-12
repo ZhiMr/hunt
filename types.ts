@@ -101,4 +101,5 @@ export type NetworkMessage =
   | { type: 'STATE_UPDATE'; state: GameState }
   | { type: 'INPUT_UPDATE'; input: PlayerInput }
   | { type: 'PLAYER_JOINED'; role: PlayerRole }
-  | { type: 'START_GAME' };
+  | { type: 'LOBBY_UPDATE'; hostRole: EntityType }
+  | { type: 'START_GAME'; clientRole: EntityType };
