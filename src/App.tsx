@@ -18,6 +18,13 @@ const PEER_CONFIG = {
     }
 };
 
+// Helper to round entity for network transmission
+const roundEntity = (e: any) => ({
+    ...e,
+    pos: { x: Math.round(e.pos.x), y: Math.round(e.pos.y) },
+    velocity: e.velocity ? { x: Math.round(e.velocity.x), y: Math.round(e.velocity.y) } : undefined
+});
+
 // --- Initial State Factory ---
 const createInitialState = (): GameState => {
   const center = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
@@ -488,6 +495,7 @@ const App: React.FC = () => {
                 const newState = {
                     ...prev,
                     ...data.state,
+                    // Keep existing static entities if not provided in update
                     trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
                     cabin: data.state.cabin ? data.state.cabin : prev.cabin,
                 };
@@ -529,6 +537,9 @@ const App: React.FC = () => {
     }
 
     const newState = createInitialState();
+    // No need to locally round for host physics, only for sending
+    
+    newState.demon.pos = { x: 100, y: 100 }; // Default, will override below
     const obstacles = [...newState.trees, newState.cabin];
 
     let attempts = 0;
@@ -580,7 +591,7 @@ const App: React.FC = () => {
         // Lag Detection
         if (opponentMode === 'CONNECTED') {
             const timeSinceLastPacket = Date.now() - lastPacketTimeRef.current;
-            if (timeSinceLastPacket > 2500 && !isLagging) { // 2.5s tolerance
+            if (timeSinceLastPacket > 2500 && !isLagging) { 
                 setIsLagging(true);
             }
         }
@@ -651,11 +662,22 @@ const App: React.FC = () => {
 
       if (gameMode === GameMode.ONLINE_HOST && connRef.current) {
           networkTickRef.current += deltaTime;
-          if (networkTickRef.current >= 0.05) { 
+          if (networkTickRef.current >= 0.05) { // 20 updates per second
               try {
                   if (connRef.current.open) {
-                      const { trees, cabin, ...dynamicState } = nextState;
-                      connRef.current.send({ type: 'STATE_UPDATE', state: dynamicState });
+                      // Optimization: Round coordinates integers to save bandwidth
+                      const dynamicState = {
+                          ...nextState,
+                          hunter: roundEntity(nextState.hunter),
+                          demon: roundEntity(nextState.demon),
+                          deers: nextState.deers.map(roundEntity),
+                          bullets: nextState.bullets.map(b => ({...b, pos: {x: Math.round(b.pos.x), y: Math.round(b.pos.y)}})),
+                          mushrooms: nextState.mushrooms // Static positions, but list changes
+                      };
+                      
+                      // Remove static heavy objects
+                      const { trees, cabin, ...optimizedState } = dynamicState;
+                      connRef.current.send({ type: 'STATE_UPDATE', state: optimizedState });
                   }
               } catch(e) {
                   // swallow errors
@@ -675,6 +697,9 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current!);
   }, [gameMode, myRole, opponentMode]); 
 
+  // ... (Rest of the file remains unchanged)
+  
+  // UI Handlers (Shortened for brevity as they are unchanged except for imports)
   const handleCopy = () => {
     navigator.clipboard.writeText(roomId);
     setIsCopied(true);
@@ -786,6 +811,7 @@ const App: React.FC = () => {
       </div>
   );
 
+  // --- RENDER ---
   const renderMenu = () => (
     <div className="flex flex-col gap-4 items-center">
       <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
@@ -1049,6 +1075,10 @@ const App: React.FC = () => {
           </div>
       )}
 
+      {/* REMAINDER OF FILE IS UNCHANGED... */}
+      {/* HUD and Game Canvas Container */}
+      {/* ... */}
+      
       {gameState.phase === GamePhase.PLAYING && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
              <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
