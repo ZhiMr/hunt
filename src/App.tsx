@@ -466,9 +466,12 @@ const App: React.FC = () => {
                 setGameState(prev => ({
                     ...prev,
                     ...data.state,
-                    // Preserve static heavy data if missing in update
-                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
-                    cabin: data.state.cabin ? data.state.cabin : prev.cabin,
+                    // FORCE FALLBACK TO EMPTY ARRAYS TO PREVENT UNDEFINED
+                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : (prev.trees || []),
+                    cabin: data.state.cabin ? data.state.cabin : (prev.cabin || createInitialState().cabin),
+                    mushrooms: data.state.mushrooms || prev.mushrooms || [],
+                    deers: data.state.deers || prev.deers || [],
+                    bullets: data.state.bullets || prev.bullets || [],
                 }));
             } else if (data.type === 'PING') {
                 try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
@@ -627,7 +630,6 @@ const App: React.FC = () => {
     setTimeout(() => setIsCopied(false), 2000);
   };
 
-  // ... [Render implementations for JoinPanel, Rules, Menu, Lobby omitted for brevity but retained in structure] ...
   const renderJoinPanel = () => (
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-md w-full p-8 relative shadow-2xl flex flex-col items-center gap-6">

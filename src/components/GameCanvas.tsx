@@ -17,7 +17,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
   // --- Rendering Helpers ---
   const drawEntity = (ctx: CanvasRenderingContext2D, entity: Entity, color: string, isDemon = false) => {
-    if (!entity || !entity.pos) return; // Safety check
+    if (!entity || !entity.pos) return; // Safety Check
 
     ctx.save();
     ctx.translate(entity.pos.x, entity.pos.y);
@@ -187,14 +187,13 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     // --- Camera Logic ---
     const targetEntity = cameraTarget === 'HUNTER' ? gameState.hunter : gameState.demon;
     
-    // Safety check for camera target
+    // Safety check for camera target existence
     if (!targetEntity || !targetEntity.pos) {
-        // Render simple loading/error state if data missing
         ctx.fillStyle = '#111';
         ctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = '#666';
         ctx.font = '20px monospace';
-        ctx.fillText("WAITING FOR DATA...", 20, 40);
+        ctx.fillText("WAITING FOR SYNC...", 20, 40);
         return;
     }
 
@@ -213,11 +212,12 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
     
     // 2. Static Objects (Dim - Fogged)
-    // CRITICAL FIX: Add fallback empty array to prevent crash if trees are undefined during sync
+    // CRITICAL FIX: Fallback to empty array if trees is undefined to prevent crash
     const allObstacles = [...(gameState.trees || []), gameState.cabin].filter(Boolean);
+    
     // Draw dim versions
     allObstacles.forEach(obj => {
-       if(!obj) return;
+       if (!obj) return;
        ctx.save();
        ctx.translate(obj.pos.x, obj.pos.y);
        ctx.fillStyle = '#222'; // Silhouette
@@ -346,7 +346,10 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
     // Entities
     [...(gameState.deers || [])].forEach(deer => drawEntity(ctx, deer, COLORS.DEER));
-    if (gameState.demon) drawEntity(ctx, gameState.demon, gameState.isNight ? COLORS.DEMON_NIGHT : COLORS.DEMON_DAY, gameState.isNight);
+    
+    if (gameState.demon) {
+       drawEntity(ctx, gameState.demon, gameState.isNight ? COLORS.DEMON_NIGHT : COLORS.DEMON_DAY, gameState.isNight);
+    }
     
     // Only draw hunter if NOT in cabin
     if (gameState.hunter && !gameState.hunter.inCabin) {
