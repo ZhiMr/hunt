@@ -20,7 +20,7 @@ export const TREE_COLLISION_RATIO = 0.35; // Tree trunk size relative to visual 
 
 export const BULLET_SPEED = 8; // Reduced from 12
 export const SHOOT_COOLDOWN = 60; // Frames
-export const MAX_BULLETS = 999; // Changed from Infinity to prevent JSON 'null' serialization
+export const MAX_BULLETS = 999; // CRITICAL FIX: Infinity causes network crash (becomes null in JSON)
 export const SHOOT_PENALTY_SECONDS = 12; // Adjusted to 12 seconds cost per shot
 export const DEMON_STUN_DURATION = 0.5; // Seconds demon is stunned if shot at night
 export const DEMON_TRACKING_DURATION = 1.0; // Seconds the tracking arrow is visible

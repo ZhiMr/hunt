@@ -4,17 +4,20 @@ import { MobileControls } from './components/MobileControls';
 import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput } from './types';
 import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
 import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff, Activity } from 'lucide-react';
+import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff, Activity, AlertTriangle } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
 
-// Explicit STUN config for better mobile/network compatibility
+// --- Production Network Config ---
 const PEER_CONFIG = {
     debug: 1,
+    secure: true, 
     config: {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
+            { urls: 'stun:global.stun.twilio.com:3478' },
+            { urls: 'stun:stun.qq.com:3478' } 
+        ],
+        iceCandidatePoolSize: 10,
     }
 };
 
@@ -190,8 +193,7 @@ const createInitialState = (): GameState => {
 };
 
 const generateRoomId = () => {
-    // Generate a robust 6-char ID
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No I, 1, O, 0 for clarity
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
     let result = '';
     for (let i = 0; i < 6; i++) {
         result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -199,7 +201,6 @@ const generateRoomId = () => {
     return result;
 };
 
-// Opponent Mode for Lobby State
 type OpponentMode = 'WAITING' | 'COMPUTER' | 'CONNECTED';
 
 const App: React.FC = () => {
@@ -224,9 +225,11 @@ const App: React.FC = () => {
   // Network Health
   const [isLagging, setIsLagging] = useState(false);
   const lastPacketTimeRef = useRef<number>(0);
-  const gameStartedRef = useRef<boolean>(false); // NEW: Prevents premature state updates
   
-  // DIAGNOSTICS
+  // CRITICAL: Prevents updates before initialization
+  const gameStartedRef = useRef<boolean>(false); 
+  
+  // DEBUGGING
   const packetCountRef = useRef<number>(0);
   const [lastError, setLastError] = useState<string>("");
 
@@ -243,8 +246,6 @@ const App: React.FC = () => {
     w: false, a: false, s: false, d: false, space: false,
     up: false, left: false, down: false, right: false, enter: false
   });
-  
-  // Remote Input (State from the other player)
   const remoteInputRef = useRef<PlayerInput>({
     up: false, down: false, left: false, right: false, action: false
   });
@@ -252,7 +253,6 @@ const App: React.FC = () => {
   const requestRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
 
-  // Initialize PeerJS cleanup
   useEffect(() => {
     return () => {
       if (peerRef.current) peerRef.current.destroy();
@@ -260,7 +260,6 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Detect Mobile
   useEffect(() => {
     const checkMobile = () => {
       setIsMobile('ontouchstart' in window || navigator.maxTouchPoints > 0 || window.innerWidth < 768);
@@ -270,25 +269,20 @@ const App: React.FC = () => {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  // Sync Host Role to Client in Lobby
   useEffect(() => {
       if (gameMode === GameMode.ONLINE_HOST && connRef.current && opponentMode === 'CONNECTED') {
-          // Safe send
           try {
-             const lobbyMsg = { type: 'LOBBY_UPDATE', hostRole: myRole };
-             connRef.current.send(lobbyMsg);
+             connRef.current.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
           } catch(e) { console.error("Lobby update failed", e); }
       }
   }, [myRole, gameMode, opponentMode]);
 
-  // Shared Ping Logic (Bi-directional)
   useEffect(() => {
     if ((gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT) && opponentMode === 'CONNECTED') {
         pingIntervalRef.current = window.setInterval(() => {
             if (connRef.current && connRef.current.open) {
                 try {
-                    const pingMsg = { type: 'PING', timestamp: Date.now() };
-                    connRef.current.send(pingMsg);
+                    connRef.current.send({ type: 'PING', timestamp: Date.now() });
                 } catch (e) { /* ignore */ }
             }
         }, 1000);
@@ -305,13 +299,9 @@ const App: React.FC = () => {
     }
   }, [gameMode, opponentMode]);
 
-
-  // Keyboard Listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) {
-        e.preventDefault();
-      }
+      if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
       switch (e.key.toLowerCase()) {
         case 'w': inputRef.current.w = true; break;
         case 'a': inputRef.current.a = true; break;
@@ -347,16 +337,9 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // --- Network Logic ---
   const initializeHost = () => {
-    if (peerRef.current) {
-        peerRef.current.destroy();
-        peerRef.current = null;
-    }
-    if (connRef.current) {
-        connRef.current.close();
-        connRef.current = null;
-    }
+    if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+    if (connRef.current) { connRef.current.close(); connRef.current = null; }
 
     setOpponentMode('WAITING');
     setLatency(null);
@@ -371,41 +354,32 @@ const App: React.FC = () => {
     
     peer.on('open', (id) => {
       if (peer !== peerRef.current) return;
-      console.log('My peer ID is: ' + id);
+      console.log('Host ID: ' + id);
       setGameMode(GameMode.ONLINE_HOST);
       isHostRef.current = true;
     });
     
     peer.on('error', (err) => {
-        if (peer !== peerRef.current) return;
-        console.error("Host Peer Error:", err);
+        console.error("Host Error:", err);
         setLastError(`HostErr: ${err.type}`);
-        setJoinError("创建房间失败");
-        window.alert(`创建失败: ${err.type}`);
+        setJoinError("创建失败");
+        window.alert(`错误: ${err.type}`);
         setGameState(prev => ({...prev, phase: GamePhase.MENU}));
     });
 
     peer.on('connection', (conn) => {
       if (peer !== peerRef.current) return;
-
       conn.on('open', () => {
         if (peer !== peerRef.current) return;
         setOpponentMode('CONNECTED');
         connRef.current = conn;
         lastPacketTimeRef.current = Date.now();
-        // Host immediately sends LOBBY_UPDATE upon connection to sync roles
-        try {
-            conn.send({ type: 'LOBBY_UPDATE', hostRole: myRole });
-        } catch(e) { console.error("Failed to send lobby update", e); }
+        try { conn.send({ type: 'LOBBY_UPDATE', hostRole: myRole }); } catch(e){}
       });
       conn.on('data', (data: any) => {
         lastPacketTimeRef.current = Date.now();
-        if (data.type === 'INPUT_UPDATE') {
-          remoteInputRef.current = data.input;
-        } else if (data.type === 'PONG') {
-            const rtt = Date.now() - data.timestamp;
-            setLatency(rtt);
-        }
+        if (data.type === 'INPUT_UPDATE') remoteInputRef.current = data.input;
+        else if (data.type === 'PONG') setLatency(Date.now() - data.timestamp);
       });
       conn.on('close', () => {
         if (conn === connRef.current) {
@@ -415,55 +389,34 @@ const App: React.FC = () => {
              gameStartedRef.current = false;
         }
       });
-      conn.on('error', (err) => {
-          console.error("Connection error", err);
-          setLastError(`ConnErr: ${err.type}`);
-      });
     });
-
     peerRef.current = peer;
   };
 
   const joinGame = () => {
     setJoinError("");
-    if (!joinId) {
-        setJoinError("请输入房间号");
-        return;
-    }
+    if (!joinId) { setJoinError("请输入房间号"); return; }
     
     setIsConnecting(true);
+    if (peerRef.current) peerRef.current.destroy();
 
-    if (peerRef.current) {
-        peerRef.current.destroy();
-    }
-
-    // Generate random Client ID
     const peer = new Peer(generateRoomId(), PEER_CONFIG);
     
     peer.on('error', (err: any) => {
-        if (peer !== peerRef.current) return;
-        console.error("Peer Error:", err);
-        setLastError(`ClientPeerErr: ${err.type}`);
+        console.error("Client Error:", err);
+        setLastError(`ClientErr: ${err.type}`);
         setIsConnecting(false);
-        if (err.type === 'peer-unavailable') {
-            setJoinError("房间号不存在或主机未连接");
-        } else if (err.type === 'unavailable-id') {
-            // Retry with new ID if collision (rare)
-            setTimeout(joinGame, 100);
-        } else {
-            setJoinError(`连接错误 (${err.type})`);
-        }
+        if (err.type === 'peer-unavailable') setJoinError("房间不存在");
+        else setJoinError(`连接错误: ${err.type}`);
     });
 
     peer.on('open', (id) => {
       if (peer !== peerRef.current) return;
-      
       const conn = peer.connect(joinId.trim().toUpperCase(), { reliable: true });
       
-      // Connection Timeout Fallback (10s)
       const timeout = setTimeout(() => {
           if (peerRef.current === peer && opponentMode !== 'CONNECTED') {
-              setJoinError("连接超时，请检查网络或重试");
+              setJoinError("连接超时");
               setIsConnecting(false);
               conn.close();
           }
@@ -472,7 +425,6 @@ const App: React.FC = () => {
       conn.on('open', () => {
         clearTimeout(timeout);
         if (peer !== peerRef.current) return;
-        
         console.log("Connected to: " + joinId);
         setJoinError(""); 
         setIsConnecting(false);
@@ -482,12 +434,10 @@ const App: React.FC = () => {
         isHostRef.current = false;
         lastPacketTimeRef.current = Date.now();
         setIsLagging(false);
-        gameStartedRef.current = false; // Reset start flag
+        gameStartedRef.current = false; 
         packetCountRef.current = 0;
         setLastError("");
-        
         setMyRole(EntityType.DEMON); 
-        
         setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }));
         setOpponentMode('CONNECTED');
         connRef.current = conn;
@@ -495,7 +445,6 @@ const App: React.FC = () => {
 
       conn.on('data', (data: any) => {
         try {
-            // Any data received means connection is alive
             lastPacketTimeRef.current = Date.now();
             if (isLagging) setIsLagging(false);
             packetCountRef.current += 1;
@@ -503,39 +452,32 @@ const App: React.FC = () => {
             if (data.type === 'LOBBY_UPDATE') {
                 setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
             } else if (data.type === 'START_GAME') {
-                // Mark game as started immediately
+                // LOCK: Enable processing of state updates
                 gameStartedRef.current = true;
-                
-                if (data.clientRole) {
-                    setMyRole(data.clientRole);
-                }
+                if (data.clientRole) setMyRole(data.clientRole);
                 if (data.initialState) {
                     setGameState(data.initialState);
                     lastTimeRef.current = 0; 
                 }
             } else if (data.type === 'STATE_UPDATE') {
-                // CRITICAL: Ignore state updates if game hasn't officially started (prevents race conditions)
+                // CRITICAL LOCK CHECK
                 if (!gameStartedRef.current) return;
 
-                setGameState(prev => {
-                    const newState = {
-                        ...prev,
-                        ...data.state,
-                        // Keep existing static entities if not provided in update
-                        trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
-                        cabin: data.state.cabin ? data.state.cabin : prev.cabin,
-                    };
-                    return newState;
-                });
+                setGameState(prev => ({
+                    ...prev,
+                    ...data.state,
+                    // Preserve static heavy data if missing in update
+                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : prev.trees,
+                    cabin: data.state.cabin ? data.state.cabin : prev.cabin,
+                }));
             } else if (data.type === 'PING') {
                 try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
             } else if (data.type === 'PONG') {
-                const rtt = Date.now() - data.timestamp;
-                setLatency(rtt);
+                setLatency(Date.now() - data.timestamp);
             }
         } catch (err: any) {
-            console.error("Packet Process Error", err);
-            setLastError(`PktErr: ${err.message}`);
+            console.error("Packet Error", err);
+            setLastError(`Pkt: ${err.message}`);
         }
       });
       
@@ -543,71 +485,49 @@ const App: React.FC = () => {
           clearTimeout(timeout);
           window.alert("Host disconnected");
           gameStartedRef.current = false;
-          setLastError("Host Disconnected");
+          setLastError("Host Lost");
           setGameState(prev => ({...prev, phase: GamePhase.MENU}));
       });
       
       conn.on('error', (err) => {
           clearTimeout(timeout);
-          console.error("Conn Error", err);
-          setLastError(`ConnErr: ${err.type}`);
-          setJoinError("连接断开");
+          setLastError(`Conn: ${err.type}`);
           setIsConnecting(false);
       });
     });
-
     peerRef.current = peer;
   };
 
   const startGame = () => {
     if (gameMode === GameMode.ONLINE_CLIENT) return;
-
     if (gameMode === GameMode.ONLINE_HOST) {
-        if (!connRef.current || opponentMode !== 'CONNECTED') {
-            console.warn("Attempted to start game without valid connection");
-            return;
-        }
+        if (!connRef.current || opponentMode !== 'CONNECTED') return;
     }
 
     const newState = createInitialState();
-    // No need to locally round for host physics, only for sending
-    
-    newState.demon.pos = { x: 100, y: 100 }; // Default, will override below
+    // Host Authoritative Spawn
     const obstacles = [...newState.trees, newState.cabin];
-
-    let attempts = 0;
     let valid = false;
     let spawnPos = { x: 100, y: 100 };
-
+    let attempts = 0;
     while (!valid && attempts < 100) {
-      const dx = Math.random() * (MAP_SIZE - 100) + 50;
-      const dy = Math.random() * (MAP_SIZE - 100) + 50;
-      const candidate = { x: dx, y: dy };
-      const distFromHunter = distance(candidate, newState.hunter.pos);
-      const isColliding = checkCollision(candidate, newState.demon.size, obstacles);
-      if (distFromHunter > 300 && !isColliding) {
+      attempts++;
+      const candidate = { x: Math.random() * (MAP_SIZE - 100) + 50, y: Math.random() * (MAP_SIZE - 100) + 50 };
+      if (distance(candidate, newState.hunter.pos) > 300 && !checkCollision(candidate, newState.demon.size, obstacles)) {
         valid = true;
         spawnPos = candidate;
       }
-      attempts++;
     }
-    
     newState.demon.pos = spawnPos;
     newState.phase = GamePhase.PLAYING;
 
     if (connRef.current && isHostRef.current) {
-        const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
         try {
+            const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
             const fullState = JSON.parse(JSON.stringify(newState));
-            connRef.current.send({ 
-                type: 'START_GAME', 
-                clientRole,
-                initialState: fullState 
-            });
-            gameStartedRef.current = true; // Host also marks as started
-        } catch(e) {
-            console.error("Failed to send START_GAME", e);
-        }
+            connRef.current.send({ type: 'START_GAME', clientRole, initialState: fullState });
+            gameStartedRef.current = true;
+        } catch(e) { console.error("Start Error", e); }
     }
 
     setGameState(newState);
@@ -620,45 +540,37 @@ const App: React.FC = () => {
     lastTimeRef.current = timestamp;
     const safeDelta = Math.min(deltaTime, 0.1); 
 
-    // CLIENT MODE
     if (gameMode === GameMode.ONLINE_CLIENT) {
-        // Lag Detection
+        // Lag Watchdog
         if (opponentMode === 'CONNECTED') {
-            const timeSinceLastPacket = Date.now() - lastPacketTimeRef.current;
-            if (timeSinceLastPacket > 2500 && !isLagging) { 
-                setIsLagging(true);
-            }
+            if (Date.now() - lastPacketTimeRef.current > 2500 && !isLagging) setIsLagging(true);
         }
 
         inputTickRef.current += deltaTime;
         if (inputTickRef.current >= 0.033) { 
             if (connRef.current && connRef.current.open) {
-                const myInput: PlayerInput = {
+                const myInput = {
                     up: inputRef.current.up || inputRef.current.w,
                     down: inputRef.current.down || inputRef.current.s,
                     left: inputRef.current.left || inputRef.current.a,
                     right: inputRef.current.right || inputRef.current.d,
                     action: inputRef.current.enter || inputRef.current.space
                 };
-                try {
-                    connRef.current.send({ type: 'INPUT_UPDATE', input: myInput });
-                } catch(e) { /* Ignore send errors */ }
+                try { connRef.current.send({ type: 'INPUT_UPDATE', input: myInput }); } catch(e) {}
             }
             inputTickRef.current = 0;
         }
-        
         requestRef.current = requestAnimationFrame(loop);
         return; 
     }
 
-    // HOST MODE Logic
+    // Host/Single Loop
     setGameState(prev => {
       if (prev.phase !== GamePhase.PLAYING) return prev;
 
-      let hunterIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
-      let demonIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
-
-      const localInput: PlayerInput = {
+      let hunterIn = { up: false, down: false, left: false, right: false, action: false };
+      let demonIn = { up: false, down: false, left: false, right: false, action: false };
+      const localInput = {
           up: inputRef.current.w || inputRef.current.up,
           down: inputRef.current.s || inputRef.current.down,
           left: inputRef.current.a || inputRef.current.left,
@@ -666,63 +578,41 @@ const App: React.FC = () => {
           action: inputRef.current.space || inputRef.current.enter
       };
 
-      if (myRole === EntityType.HUNTER) {
-          hunterIn = localInput;
-      } else {
-          demonIn = localInput;
-      }
+      if (myRole === EntityType.HUNTER) hunterIn = localInput; else demonIn = localInput;
 
       if (gameMode === GameMode.ONLINE_HOST) {
-          if (myRole === EntityType.HUNTER) demonIn = remoteInputRef.current;
-          else hunterIn = remoteInputRef.current;
-      } else {
-          if (opponentMode === 'COMPUTER') {
+          if (myRole === EntityType.HUNTER) demonIn = remoteInputRef.current; else hunterIn = remoteInputRef.current;
+      } else if (opponentMode === 'COMPUTER') {
              const obstacles = [...prev.trees, prev.cabin];
-             if (myRole === EntityType.HUNTER) {
-                 demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight, safeDelta);
-             } else {
-                 hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight, safeDelta);
-             }
-          }
+             if (myRole === EntityType.HUNTER) demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight, safeDelta);
+             else hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight, safeDelta);
       }
 
       let nextState;
-      try {
-          nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
-      } catch (err) {
-          console.error("Game Logic Error:", err);
-          return prev; 
-      }
+      try { nextState = updateGame(prev, hunterIn, demonIn, safeDelta); } catch (err) { return prev; }
 
       if (gameMode === GameMode.ONLINE_HOST && connRef.current) {
           networkTickRef.current += deltaTime;
-          if (networkTickRef.current >= 0.05) { // 20 updates per second
+          if (networkTickRef.current >= 0.05) { 
               try {
                   if (connRef.current.open) {
-                      // Optimization: Round coordinates integers to save bandwidth
                       const dynamicState = {
                           ...nextState,
                           hunter: roundEntity(nextState.hunter),
                           demon: roundEntity(nextState.demon),
                           deers: nextState.deers.map(roundEntity),
                           bullets: nextState.bullets.map(b => ({...b, pos: {x: Math.round(b.pos.x), y: Math.round(b.pos.y)}})),
-                          mushrooms: nextState.mushrooms // Static positions, but list changes
+                          mushrooms: nextState.mushrooms
                       };
-                      
-                      // Remove static heavy objects
                       const { trees, cabin, ...optimizedState } = dynamicState;
                       connRef.current.send({ type: 'STATE_UPDATE', state: optimizedState });
                   }
-              } catch(e) {
-                  // swallow errors
-              }
+              } catch(e) {}
               networkTickRef.current = 0;
           }
       }
-
       return nextState;
     });
-    
     requestRef.current = requestAnimationFrame(loop);
   };
 
@@ -731,14 +621,13 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current!);
   }, [gameMode, myRole, opponentMode]); 
 
-  // ... (Rest of UI components renderRules, renderMenu, renderLobby, and main Render remain largely same but preserved in full output below)
-  
   const handleCopy = () => {
     navigator.clipboard.writeText(roomId);
     setIsCopied(true);
     setTimeout(() => setIsCopied(false), 2000);
   };
 
+  // ... [Render implementations for JoinPanel, Rules, Menu, Lobby omitted for brevity but retained in structure] ...
   const renderJoinPanel = () => (
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-md w-full p-8 relative shadow-2xl flex flex-col items-center gap-6">
@@ -762,13 +651,12 @@ const App: React.FC = () => {
                       className={`w-full bg-stone-900 border-2 rounded-lg p-4 text-center text-3xl font-mono tracking-widest text-white uppercase focus:outline-none focus:ring-2 transition-all disabled:opacity-50
                           ${joinError ? 'border-red-500 focus:ring-red-500/50' : 'border-stone-700 focus:border-blue-500 focus:ring-blue-500/50'}`}
                       onChange={(e) => {
-                          setJoinId(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')); // Sanitize
+                          setJoinId(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''));
                           if(joinError) setJoinError("");
                       }}
                       value={joinId}
                       maxLength={6}
                       disabled={isConnecting}
-                      autoCapitalize="characters"
                   />
                   {joinError && (
                       <span className="text-sm text-red-500 font-bold text-center animate-pulse flex items-center justify-center gap-1">
@@ -801,11 +689,7 @@ const App: React.FC = () => {
               >
                   <X size={24} />
               </button>
-              
-              <h2 className="text-3xl font-bold text-green-400 mb-6 flex items-center gap-2">
-                  <BookOpen /> 游戏规则
-              </h2>
-
+              <h2 className="text-3xl font-bold text-green-400 mb-6 flex items-center gap-2"><BookOpen /> 游戏规则</h2>
               <div className="space-y-6 text-stone-300">
                   <section>
                       <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">1. 角色目标</h3>
@@ -822,7 +706,6 @@ const App: React.FC = () => {
                           </div>
                       </div>
                   </section>
-
                   <section>
                       <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">2. 昼夜机制</h3>
                       <ul className="list-disc list-inside space-y-2 text-sm">
@@ -830,7 +713,6 @@ const App: React.FC = () => {
                           <li><span className="text-red-500 font-bold">夜晚 (40秒)</span>: 恶魔现出原形，视野变小但速度极快。猎人无法在夜晚彻底杀死恶魔，只能将其<strong>击晕0.5秒</strong>。</li>
                       </ul>
                   </section>
-
                   <section>
                       <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">3. 关键道具 & 技能</h3>
                       <ul className="list-disc list-inside space-y-2 text-sm">
@@ -847,7 +729,6 @@ const App: React.FC = () => {
   const renderMenu = () => (
     <div className="flex flex-col gap-4 items-center">
       <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
-      
       <button 
         onClick={() => {
             setGameMode(GameMode.SINGLE_PLAYER);
@@ -859,13 +740,11 @@ const App: React.FC = () => {
       >
         <Monitor size={20}/> 本地游戏 / 单人
       </button>
-
       <button 
         onClick={() => {
             setGameMode(GameMode.ONLINE_HOST); 
             setOpponentMode('WAITING');
             setLatency(null);
-
             initializeHost();
             setMyRole(EntityType.HUNTER);
             setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
@@ -874,7 +753,6 @@ const App: React.FC = () => {
       >
         <Users size={20}/> 创建在线房间
       </button>
-
       <button 
         onClick={() => {
             setJoinError("");
@@ -895,9 +773,6 @@ const App: React.FC = () => {
         const isMyRole = myRole === role;
         let statusText = "空缺";
         let statusColor = "text-stone-500";
-        let isCpu = false;
-        let isConnected = false;
-
         if (isMyRole) {
             statusText = "你 (Player 1)";
             statusColor = "text-green-400";
@@ -908,17 +783,13 @@ const App: React.FC = () => {
             } else if (opponentMode === 'COMPUTER') {
                 statusText = "电脑 (AI)";
                 statusColor = "text-purple-400";
-                isCpu = true;
             } else if (opponentMode === 'CONNECTED') {
                 statusText = "玩家 2 (已连接)";
                 statusColor = "text-blue-400";
-                isConnected = true;
             }
         }
-
         const canAddCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode !== 'COMPUTER';
         const canRemoveCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'COMPUTER';
-        
         const canSwitchRole = (gameMode === GameMode.SINGLE_PLAYER || gameMode === GameMode.ONLINE_HOST) && !isMyRole;
 
         return (
@@ -930,9 +801,7 @@ const App: React.FC = () => {
                 onClick={() => {
                    if (canSwitchRole) {
                        setMyRole(role);
-                       if (gameMode === GameMode.SINGLE_PLAYER) {
-                           setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
-                       }
+                       if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
                    }
                 }}
             >
@@ -941,14 +810,10 @@ const App: React.FC = () => {
                 </div>
                 <h3 className="text-lg md:text-xl font-bold uppercase mb-2">{role === EntityType.HUNTER ? '猎人' : '恶魔'}</h3>
                 <span className={`text-xs md:text-sm font-bold ${statusColor}`}>{statusText}</span>
-
                 {canAddCpu && (
                     <button 
                         className="mt-4 px-3 py-1 bg-stone-700 hover:bg-stone-600 rounded text-xs flex items-center gap-1 z-10"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setOpponentMode('COMPUTER');
-                        }}
+                        onClick={(e) => { e.stopPropagation(); setOpponentMode('COMPUTER'); }}
                     >
                         <UserPlus size={14}/> <span className="hidden md:inline">电脑</span>
                     </button>
@@ -956,10 +821,7 @@ const App: React.FC = () => {
                 {canRemoveCpu && (
                     <button 
                         className="mt-4 px-3 py-1 bg-red-900/50 hover:bg-red-900 text-red-200 rounded text-xs flex items-center gap-1 z-10"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setOpponentMode('WAITING');
-                        }}
+                        onClick={(e) => { e.stopPropagation(); setOpponentMode('WAITING'); }}
                     >
                         <User size={14}/> <span className="hidden md:inline">移除</span>
                     </button>
@@ -973,14 +835,12 @@ const App: React.FC = () => {
             <h2 className="text-2xl md:text-3xl font-bold text-stone-200 mb-6 flex items-center gap-3">
                 <Users /> 选择角色 {isOnline && <span className="text-xs text-blue-400 bg-blue-900/30 px-2 py-1 rounded border border-blue-500/30">在线模式</span>}
             </h2>
-
             <button 
                 onClick={() => setShowRules(true)}
                 className="absolute top-4 right-4 md:top-8 md:right-8 text-stone-400 hover:text-green-400 flex items-center gap-2 transition"
             >
                 <BookOpen size={20} /> <span className="hidden sm:inline">规则</span>
             </button>
-
             {gameMode === GameMode.ONLINE_HOST && (
                 <div className="mb-6 px-4 py-2 bg-neutral-900 rounded border border-neutral-600 flex items-center gap-4">
                     <span className="text-stone-400 text-xs md:text-sm">房间号</span>
@@ -990,8 +850,6 @@ const App: React.FC = () => {
                     </button>
                 </div>
             )}
-            
-            {/* Latency Display in Lobby */}
             {opponentMode === 'CONNECTED' && latency !== null && (
                 <div className="absolute top-4 left-4 md:top-8 md:left-8 flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10">
                     <Signal size={16} className={latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
@@ -1001,13 +859,11 @@ const App: React.FC = () => {
                     </div>
                 </div>
             )}
-
             <div className="flex flex-row gap-4 md:gap-8 mb-8">
                 {renderCard(EntityType.HUNTER)}
                 <div className="hidden md:flex items-center text-stone-600 font-bold text-xl">VS</div>
                 {renderCard(EntityType.DEMON)}
             </div>
-
             <div className="flex gap-4 w-full max-w-md">
                 <button 
                     onClick={() => {
@@ -1021,7 +877,6 @@ const App: React.FC = () => {
                 >
                     返回
                 </button>
-                
                 {gameMode === GameMode.SINGLE_PLAYER ? (
                     <button 
                         onClick={startGame}
@@ -1048,15 +903,9 @@ const App: React.FC = () => {
                     </button>
                 )}
             </div>
-            
             {gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED' && (
                 <p className="text-sm text-yellow-500 mt-4 flex items-center gap-2 animate-pulse">
                     <Info size={16}/> 等待玩家加入以开始游戏...
-                </p>
-            )}
-            {gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'WAITING' && (
-                <p className="text-xs md:text-sm text-stone-500 mt-4 flex items-center gap-2 text-center">
-                    <Info size={16}/> 提示：如果不添加电脑，将只有你一个人在地图上
                 </p>
             )}
         </div>
@@ -1064,11 +913,9 @@ const App: React.FC = () => {
   };
 
   const cameraTarget = myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON';
-  const isPlaying = gameState.phase === GamePhase.PLAYING;
 
   return (
     <div className={`h-[100dvh] w-full bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden relative`}>
-      
       {showRules && renderRules()}
       {showJoinPanel && renderJoinPanel()}
       
@@ -1081,7 +928,7 @@ const App: React.FC = () => {
 
       {/* DIAGNOSTIC OVERLAY for ONLINE CLIENT */}
       {gameMode === GameMode.ONLINE_CLIENT && gameState.phase === GamePhase.PLAYING && (
-          <div className="absolute top-16 right-4 z-50 bg-black/60 p-2 rounded text-[10px] font-mono border border-stone-600 flex flex-col gap-1 w-32 backdrop-blur-sm pointer-events-none">
+          <div className="absolute top-16 right-4 z-50 bg-black/60 p-2 rounded text-[10px] font-mono border border-stone-600 flex flex-col gap-1 w-32 backdrop-blur-sm pointer-events-none select-none">
              <div className="flex justify-between border-b border-stone-600 pb-1 mb-1">
                  <span className="font-bold text-blue-400">DEBUG</span>
                  <span>{roomId}</span>
@@ -1098,18 +945,15 @@ const App: React.FC = () => {
                  <span>Trees:</span>
                  <span className={gameState.trees.length === 0 ? "text-red-500 font-bold" : "text-stone-300"}>{gameState.trees.length}</span>
              </div>
-             <div className="flex justify-between">
-                 <span>Ents:</span>
-                 <span className="text-stone-300">{gameState.deers.length + gameState.mushrooms.length + (gameState.cabin ? 1 : 0)}</span>
-             </div>
              {lastError && (
                  <div className="mt-1 pt-1 border-t border-red-900 text-red-400 break-words leading-tight">
-                     ! {lastError.substring(0, 40)}
+                     ! {lastError.substring(0, 30)}
                  </div>
              )}
           </div>
       )}
 
+      {/* Exit Button - Desktop Only */}
       {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
         <button 
             onClick={() => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }))}
@@ -1120,7 +964,7 @@ const App: React.FC = () => {
         </button>
       )}
 
-      {/* Latency / Lag Indicator in Game */}
+      {/* Lag Indicator */}
       {gameState.phase === GamePhase.PLAYING && (gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT) && (
           <div className="absolute top-4 left-4 z-50 flex flex-col items-start gap-1 pointer-events-none">
                {latency !== null && (
@@ -1138,45 +982,46 @@ const App: React.FC = () => {
           </div>
       )}
 
+      {/* COMPACT HUD Header */}
       {gameState.phase === GamePhase.PLAYING && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
              <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
                 <div className={`flex items-center gap-2 p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-                <div className="flex flex-col">
-                    <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
-                    <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
-                    <Gamepad2 size={14} className="md:w-5 md:h-5" />
-                    <span>∞</span>
+                    <div className="flex flex-col">
+                        <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
+                        <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
+                        <Gamepad2 size={14} className="md:w-5 md:h-5" />
+                        <span>∞</span>
+                        </div>
                     </div>
-                </div>
                 </div>
 
                 <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
-                <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none font-bold text-shadow">
-                    {gameState.isNight ? "存活" : "入夜"}
-                </span>
-                <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700/50 rounded-full overflow-hidden border border-white/10 relative">
-                    <div 
-                    className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-600' : 'bg-yellow-500'}`}
-                    style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
-                    />
-                </div>
-                <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
-                    {gameState.isNight 
-                        ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
-                        : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
-                    }
-                </span>
+                    <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none font-bold text-shadow">
+                        {gameState.isNight ? "存活" : "入夜"}
+                    </span>
+                    <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700/50 rounded-full overflow-hidden border border-white/10 relative">
+                        <div 
+                        className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-600' : 'bg-yellow-500'}`}
+                        style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
+                        />
+                    </div>
+                    <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
+                        {gameState.isNight 
+                            ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
+                            : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
+                        }
+                    </span>
                 </div>
 
                 <div className={`flex items-center gap-2 text-right p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-                <div className="flex flex-col items-end">
-                    <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
-                    <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
-                    <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
-                    <Skull size={14} className="md:w-5 md:h-5" />
+                    <div className="flex flex-col items-end">
+                        <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
+                        <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
+                        <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
+                        <Skull size={14} className="md:w-5 md:h-5" />
+                        </div>
                     </div>
-                </div>
                 </div>
              </div>
             
@@ -1203,7 +1048,6 @@ const App: React.FC = () => {
       )}
 
       <div className={`w-full h-full flex items-center justify-center overflow-y-auto ${gameState.phase !== GamePhase.PLAYING ? 'py-8' : ''}`}>
-        
         {(gameState.phase === GamePhase.MENU || gameState.phase === GamePhase.LOBBY) && (
             <div className="w-full max-w-4xl mx-auto flex flex-col items-center justify-center min-h-full">
                 {gameState.phase === GamePhase.MENU && renderMenu()}
@@ -1220,14 +1064,11 @@ const App: React.FC = () => {
                     
                     {gameState.phase !== GamePhase.PLAYING && (
                     <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-30 backdrop-blur-sm px-8 text-center border-2 border-stone-800">
-                        <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">
-                        游戏结束
-                        </h1>
+                        <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">游戏结束</h1>
                         <p className="text-md md:text-xl text-stone-300 mb-8 max-w-lg">
                         {gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS && <span className="text-green-400">猎人净化了森林中的邪恶！</span>}
                         {gameState.phase === GamePhase.GAME_OVER_DEMON_WINS && <span className="text-red-500">森林吞噬了又一个灵魂...</span>}
                         </p>
-                        
                         <button 
                         onClick={() => setGameState(prev => ({...prev, phase: GamePhase.LOBBY}))}
                         className="flex items-center gap-2 px-8 py-3 bg-stone-100 text-neutral-900 font-bold rounded hover:bg-white hover:scale-105 transition-all mb-8 pointer-events-auto"
@@ -1250,7 +1091,6 @@ const App: React.FC = () => {
             </div>
         )}
       </div>
-
     </div>
   );
 };
