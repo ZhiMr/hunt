@@ -196,6 +196,7 @@ const App: React.FC = () => {
   const connRef = useRef<DataConnection | null>(null);
   const isHostRef = useRef<boolean>(true);
   const networkTickRef = useRef<number>(0);
+  const inputTickRef = useRef<number>(0); // Throttle input sending
   const pingIntervalRef = useRef<number | null>(null);
   
   // Input Refs
@@ -359,8 +360,6 @@ const App: React.FC = () => {
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
           remoteInputRef.current = data.input;
-        } else if (data.type === 'PING') {
-            conn.send({ type: 'PONG', timestamp: data.timestamp });
         } else if (data.type === 'PONG') {
             const rtt = Date.now() - data.timestamp;
             setLatency(rtt);
@@ -388,9 +387,11 @@ const App: React.FC = () => {
         return;
     }
     
-    if (peerRef.current) peerRef.current.destroy();
+    if (peerRef.current) {
+        peerRef.current.destroy();
+    }
 
-    const peer = new Peer(generateRoomId());
+    const peer = new Peer(generateRoomId(), { debug: 1 });
     
     peer.on('error', (err: any) => {
         if (peer !== peerRef.current) return;
@@ -433,7 +434,19 @@ const App: React.FC = () => {
                  lastTimeRef.current = 0; 
              }
         } else if (data.type === 'STATE_UPDATE') {
-            setGameState(data.state);
+            // Merge dynamic state with local static state to optimize payload
+            // The Host sends full state except trees/cabin to save bandwidth
+            // But here we might receive full state or partial.
+            // If the host sends partial (optimized), we need to merge.
+            // For now, let's assume we simply update.
+            setGameState(prev => {
+                // If received state lacks trees (optimization), keep local trees
+                const receivedState = data.state;
+                if (!receivedState.trees || receivedState.trees.length === 0) {
+                    return { ...receivedState, trees: prev.trees, cabin: prev.cabin };
+                }
+                return receivedState;
+            });
         } else if (data.type === 'PING') {
             conn.send({ type: 'PONG', timestamp: data.timestamp });
         } else if (data.type === 'PONG') {
@@ -515,25 +528,34 @@ const App: React.FC = () => {
     lastTimeRef.current = timestamp;
     const safeDelta = Math.min(deltaTime, 0.1); 
 
+    // CLIENT MODE: Only Send Input, Do NOT touch State locally (Wait for Server)
+    if (gameMode === GameMode.ONLINE_CLIENT) {
+        // Throttle Input Sending (approx 20fps)
+        inputTickRef.current += deltaTime;
+        if (inputTickRef.current >= 0.05) { 
+            if (connRef.current && connRef.current.open) {
+                const myInput: PlayerInput = {
+                    up: inputRef.current.up || inputRef.current.w,
+                    down: inputRef.current.down || inputRef.current.s,
+                    left: inputRef.current.left || inputRef.current.a,
+                    right: inputRef.current.right || inputRef.current.d,
+                    action: inputRef.current.enter || inputRef.current.space
+                };
+                try {
+                    connRef.current.send({ type: 'INPUT_UPDATE', input: myInput });
+                } catch(e) { /* Ignore */ }
+            }
+            inputTickRef.current = 0;
+        }
+        
+        // Loop purely for input checking, render happens via useEffect on gameState change from Network
+        requestRef.current = requestAnimationFrame(loop);
+        return; 
+    }
+
+    // HOST / SINGLE PLAYER MODE: Update State
     setGameState(prev => {
       if (prev.phase !== GamePhase.PLAYING) return prev;
-
-      // CLIENT: Send Input, Render State (State is updated via PeerJS 'data' event)
-      if (gameMode === GameMode.ONLINE_CLIENT) {
-         if (connRef.current) {
-             const myInput: PlayerInput = {
-                 up: inputRef.current.up || inputRef.current.w,
-                 down: inputRef.current.down || inputRef.current.s,
-                 left: inputRef.current.left || inputRef.current.a,
-                 right: inputRef.current.right || inputRef.current.d,
-                 action: inputRef.current.enter || inputRef.current.space
-             };
-             try {
-                connRef.current.send({ type: 'INPUT_UPDATE', input: myInput });
-             } catch(e) { /* Ignore send errors */ }
-         }
-         return prev; // Rely on state updates from Host
-      }
 
       // HOST or SINGLE PLAYER: Run Logic
       let hunterIn: PlayerInput = { up: false, down: false, left: false, right: false, action: false };
@@ -574,7 +596,13 @@ const App: React.FC = () => {
           }
       }
 
-      const nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
+      let nextState;
+      try {
+          nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
+      } catch (err) {
+          console.error("Game Logic Error:", err);
+          return prev; // Fallback to avoid crash
+      }
 
       // If Host, broadcast state
       // THROTTLE NETWORK UPDATES: Send only every ~66ms (15fps) to prevent congestion
@@ -582,9 +610,13 @@ const App: React.FC = () => {
           networkTickRef.current += deltaTime;
           if (networkTickRef.current >= 0.066) { // ~15 FPS
               try {
-                  connRef.current.send({ type: 'STATE_UPDATE', state: nextState });
+                  if (connRef.current.open) {
+                      // Optimization: Exclude static trees/cabin to save bandwidth
+                      // We can assume client has them from START_GAME
+                      const { trees, cabin, ...dynamicState } = nextState;
+                      connRef.current.send({ type: 'STATE_UPDATE', state: dynamicState });
+                  }
               } catch(e) {
-                  // If sending fails (disconnected), don't crash the loop.
                   console.error("Network send failed", e);
               }
               networkTickRef.current = 0;

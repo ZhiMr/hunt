@@ -386,9 +386,11 @@ const App: React.FC = () => {
         return;
     }
     
-    if (peerRef.current) peerRef.current.destroy();
+    if (peerRef.current) {
+        peerRef.current.destroy();
+    }
 
-    const peer = new Peer(generateRoomId());
+    const peer = new Peer(generateRoomId(), { debug: 1 });
     
     peer.on('error', (err: any) => {
         if (peer !== peerRef.current) return;
