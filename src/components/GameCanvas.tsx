@@ -213,7 +213,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
     
     // 2. Static Objects (Dim - Fogged)
-    const allObstacles = [...(gameState.trees || []), gameState.cabin].filter(Boolean); // Filter nulls
+    // CRITICAL FIX: Add fallback empty array to prevent crash if trees are undefined during sync
+    const allObstacles = [...(gameState.trees || []), gameState.cabin].filter(Boolean);
     // Draw dim versions
     allObstacles.forEach(obj => {
        if(!obj) return;

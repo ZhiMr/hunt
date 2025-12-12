@@ -943,7 +943,11 @@ const App: React.FC = () => {
              </div>
              <div className="flex justify-between">
                  <span>Trees:</span>
-                 <span className={gameState.trees.length === 0 ? "text-red-500 font-bold" : "text-stone-300"}>{gameState.trees.length}</span>
+                 <span className={(gameState.trees?.length || 0) === 0 ? "text-red-500 font-bold" : "text-stone-300"}>{gameState.trees?.length || 0}</span>
+             </div>
+             <div className="flex justify-between">
+                 <span>Ents:</span>
+                 <span className="text-stone-300">{(gameState.deers?.length || 0) + (gameState.mushrooms?.length || 0) + (gameState.cabin ? 1 : 0)}</span>
              </div>
              {lastError && (
                  <div className="mt-1 pt-1 border-t border-red-900 text-red-400 break-words leading-tight">
