@@ -612,7 +612,7 @@ const App: React.FC = () => {
                        setMyRole(role);
                        // If Single Player, reset opponent mode if needed or keep it
                        if (gameMode === GameMode.SINGLE_PLAYER) {
-                           setOpponentMode(opponentMode === 'COMPUTER' : 'COMPUTER' : 'WAITING');
+                           setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
                        }
                    }
                 }}
