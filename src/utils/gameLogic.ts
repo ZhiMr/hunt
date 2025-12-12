@@ -1,4 +1,5 @@
-import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter, DeerAIState } from '../types';
+
+import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter } from '../types';
 import { 
   MAP_SIZE, MOVE_SPEED_HUNTER, MOVE_SPEED_DEMON, MOVE_SPEED_DEER, 
   SHOOT_COOLDOWN, BULLET_SPEED, DEMON_EAT_BONUS, MAX_BULLETS,
@@ -150,7 +151,7 @@ export const calculateBotInput = (
 
   } else {
     // --- HUNTER AI LOGIC ---
-    const hunter = me as Hunter;
+    const hunter = me as unknown as Hunter;
     // Initialize AI state if missing
     if (!hunter.aiState) {
         hunter.aiState = { mode: 'IDLE', targetPos: null, waitTimer: 0 };
@@ -579,7 +580,11 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
 
   // 8. AI Deer wandering
   newState.deers = newState.deers.map(deer => {
-    const ai = (deer.aiState as DeerAIState) || { moving: false, timer: 0 };
+    // We can safely cast here or just access if typed as Entity with optional aiState
+    // However, for Deer, we expect specific structure.
+    // If aiState is union, we might need to check fields or cast.
+    // Since game logic initializes deer with correct aiState, we can assume it.
+    const ai = (deer.aiState as any) || { moving: false, timer: 0 };
     let newAi = { ...ai };
     newAi.timer -= frameScale;
 

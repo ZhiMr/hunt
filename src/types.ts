@@ -1,3 +1,4 @@
+
 export enum GamePhase {
   MENU = 'MENU',
   LOBBY = 'LOBBY',
@@ -119,4 +120,4 @@ export type NetworkMessage =
   | { type: 'INPUT_UPDATE'; input: PlayerInput }
   | { type: 'PLAYER_JOINED'; role: PlayerRole }
   | { type: 'LOBBY_UPDATE'; hostRole: EntityType }
-  | { type: 'START_GAME'; clientRole: EntityType; initialState: GameState };
+  | { type: 'START_GAME'; clientRole: EntityType };

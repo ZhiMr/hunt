@@ -192,6 +192,7 @@ const App: React.FC = () => {
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   const isHostRef = useRef<boolean>(true);
+  const networkTickRef = useRef<number>(0);
   
   // Input Refs
   const inputRef = useRef<InputState>({
@@ -290,8 +291,6 @@ const App: React.FC = () => {
         connRef.current = conn;
         // Notify client they are joined and sync initial role
         conn.send({ type: 'PLAYER_JOINED', role: PlayerRole.CLIENT });
-        // Also send current host role so client can update lobby UI
-        // We do this via LOBBY_UPDATE in the useEffect, but good to trigger here if needed
       });
       conn.on('data', (data: any) => {
         if (data.type === 'INPUT_UPDATE') {
@@ -329,9 +328,13 @@ const App: React.FC = () => {
             setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
         }
         if (data.type === 'START_GAME') {
-             // Host sends game start signal with assigned role
+             // Host sends game start signal with assigned role AND initial state
              if (data.clientRole) {
                  setMyRole(data.clientRole);
+             }
+             if (data.initialState) {
+                 // Force entry into game immediately with received state
+                 setGameState(data.initialState);
              }
         }
         if (data.type === 'STATE_UPDATE') {
@@ -344,12 +347,7 @@ const App: React.FC = () => {
   };
 
   const startGame = () => {
-    if (connRef.current && isHostRef.current) {
-        // Host determines roles: Host is 'myRole', Client is opposite
-        const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
-        connRef.current.send({ type: 'START_GAME', clientRole });
-    }
-
+    // Create new state
     const newState = createInitialState();
     const obstacles = [...newState.trees, newState.cabin];
 
@@ -373,8 +371,18 @@ const App: React.FC = () => {
     
     newState.demon.pos = spawnPos;
     newState.phase = GamePhase.PLAYING;
+
+    // Send START_GAME with initial state to client
+    if (connRef.current && isHostRef.current) {
+        const clientRole = myRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER;
+        connRef.current.send({ 
+            type: 'START_GAME', 
+            clientRole,
+            initialState: newState 
+        });
+    }
+
     setGameState(newState);
-    
     lastTimeRef.current = 0;
   };
 
@@ -434,10 +442,10 @@ const App: React.FC = () => {
              const obstacles = [...prev.trees, prev.cabin];
              if (myRole === EntityType.HUNTER) {
                  // Bot controls Demon
-                 demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight);
+                 demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight, safeDelta);
              } else {
                  // Bot controls Hunter
-                 hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight);
+                 hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight, safeDelta);
              }
           }
       }
@@ -445,8 +453,13 @@ const App: React.FC = () => {
       const nextState = updateGame(prev, hunterIn, demonIn, safeDelta);
 
       // If Host, broadcast state
+      // THROTTLE NETWORK UPDATES: Send only every ~50ms (20fps) to avoid choking connection
       if (gameMode === GameMode.ONLINE_HOST && connRef.current) {
-          connRef.current.send({ type: 'STATE_UPDATE', state: nextState });
+          networkTickRef.current += deltaTime;
+          if (networkTickRef.current >= 0.05) { // 20 FPS
+              connRef.current.send({ type: 'STATE_UPDATE', state: nextState });
+              networkTickRef.current = 0;
+          }
       }
 
       return nextState;
