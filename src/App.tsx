@@ -19,11 +19,14 @@ const PEER_CONFIG = {
 };
 
 // Helper to round entity for network transmission
-const roundEntity = (e: any) => ({
-    ...e,
-    pos: { x: Math.round(e.pos.x), y: Math.round(e.pos.y) },
-    velocity: e.velocity ? { x: Math.round(e.velocity.x), y: Math.round(e.velocity.y) } : undefined
-});
+const roundEntity = (e: any) => {
+    if (!e || !e.pos) return e; // Safety check
+    return {
+        ...e,
+        pos: { x: Math.round(e.pos.x), y: Math.round(e.pos.y) },
+        velocity: e.velocity ? { x: Math.round(e.velocity.x), y: Math.round(e.velocity.y) } : undefined
+    };
+};
 
 // --- Initial State Factory ---
 const createInitialState = (): GameState => {
@@ -221,6 +224,7 @@ const App: React.FC = () => {
   // Network Health
   const [isLagging, setIsLagging] = useState(false);
   const lastPacketTimeRef = useRef<number>(0);
+  const gameStartedRef = useRef<boolean>(false); // NEW: Prevents premature state updates
 
   // Networking Refs
   const peerRef = useRef<Peer | null>(null);
@@ -353,6 +357,7 @@ const App: React.FC = () => {
     setOpponentMode('WAITING');
     setLatency(null);
     setIsLagging(false);
+    gameStartedRef.current = false;
     
     const id = generateRoomId();
     setRoomId(id);
@@ -400,6 +405,7 @@ const App: React.FC = () => {
              setOpponentMode('WAITING');
              connRef.current = null;
              setLatency(null);
+             gameStartedRef.current = false;
         }
       });
       conn.on('error', (err) => {
@@ -467,6 +473,7 @@ const App: React.FC = () => {
         isHostRef.current = false;
         lastPacketTimeRef.current = Date.now();
         setIsLagging(false);
+        gameStartedRef.current = false; // Reset start flag
         
         setMyRole(EntityType.DEMON); 
         
@@ -483,6 +490,9 @@ const App: React.FC = () => {
         if (data.type === 'LOBBY_UPDATE') {
             setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
         } else if (data.type === 'START_GAME') {
+             // Mark game as started immediately
+             gameStartedRef.current = true;
+             
              if (data.clientRole) {
                  setMyRole(data.clientRole);
              }
@@ -491,6 +501,9 @@ const App: React.FC = () => {
                  lastTimeRef.current = 0; 
              }
         } else if (data.type === 'STATE_UPDATE') {
+            // CRITICAL: Ignore state updates if game hasn't officially started (prevents race conditions)
+            if (!gameStartedRef.current) return;
+
             setGameState(prev => {
                 const newState = {
                     ...prev,
@@ -512,6 +525,7 @@ const App: React.FC = () => {
       conn.on('close', () => {
           clearTimeout(timeout);
           window.alert("Host disconnected");
+          gameStartedRef.current = false;
           setGameState(prev => ({...prev, phase: GamePhase.MENU}));
       });
       
@@ -571,6 +585,7 @@ const App: React.FC = () => {
                 clientRole,
                 initialState: fullState 
             });
+            gameStartedRef.current = true; // Host also marks as started
         } catch(e) {
             console.error("Failed to send START_GAME", e);
         }
@@ -697,9 +712,6 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current!);
   }, [gameMode, myRole, opponentMode]); 
 
-  // ... (Rest of the file remains unchanged)
-  
-  // UI Handlers (Shortened for brevity as they are unchanged except for imports)
   const handleCopy = () => {
     navigator.clipboard.writeText(roomId);
     setIsCopied(true);
@@ -759,6 +771,8 @@ const App: React.FC = () => {
       </div>
   );
 
+  // ... (Rest of UI components renderRules, renderMenu, renderLobby, and main Render remain largely same but preserved in full output below)
+  
   const renderRules = () => (
       <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
@@ -811,7 +825,6 @@ const App: React.FC = () => {
       </div>
   );
 
-  // --- RENDER ---
   const renderMenu = () => (
     <div className="flex flex-col gap-4 items-center">
       <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
@@ -1075,10 +1088,6 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* REMAINDER OF FILE IS UNCHANGED... */}
-      {/* HUD and Game Canvas Container */}
-      {/* ... */}
-      
       {gameState.phase === GamePhase.PLAYING && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
              <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
