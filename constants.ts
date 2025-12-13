@@ -1,3 +1,4 @@
+
 export const MAP_SIZE = 1200;
 export const VIEWPORT_WIDTH = 800;
 export const VIEWPORT_HEIGHT = 600;
@@ -15,12 +16,13 @@ export const NIGHT_THRESHOLD = 1.0;
 
 export const VISION_RADIUS_DAY = 350;
 export const VISION_RADIUS_NIGHT = 200;
+export const VISION_RADIUS_BUSH = 120; // Reduced vision when inside a bush
 export const VISION_RADIUS_DIM = 600; // How far we can see terrain
 export const TREE_COLLISION_RATIO = 0.35; // Tree trunk size relative to visual size
 
 export const BULLET_SPEED = 8; // Reduced from 12
 export const SHOOT_COOLDOWN = 60; // Frames
-export const MAX_BULLETS = Infinity; // Infinite ammo
+export const MAX_BULLETS = 999; // CRITICAL FIX: Infinity causes network crash (becomes null in JSON)
 export const SHOOT_PENALTY_SECONDS = 12; // Adjusted to 12 seconds cost per shot
 export const DEMON_STUN_DURATION = 0.5; // Seconds demon is stunned if shot at night
 export const DEMON_TRACKING_DURATION = 1.0; // Seconds the tracking arrow is visible
@@ -35,10 +37,11 @@ export const COLORS = {
   GROUND_NIGHT: '#14532d', // green-900
   TREE: '#1e293b', // slate-800
   CABIN: '#78350f', // amber-900
-  DEER: '#a8a29e', // stone-400
+  DEER: '#e5e5e5', // CHANGED: Whiter (was stone-400 #a8a29e)
   HUNTER: '#ef4444', // red-500
-  DEMON_DAY: '#a8a29e', // Matches Deer
+  DEMON_DAY: '#e5e5e5', // CHANGED: Matches Deer
   DEMON_NIGHT: '#7f1d1d', // red-900
   MUSHROOM: '#d946ef', // fuchsia-500
+  BUSH: '#15803d', // green-700
   FOG: '#000000',
 };

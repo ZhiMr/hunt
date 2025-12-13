@@ -1,4 +1,5 @@
-import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter, DeerAIState } from '../types';
+
+import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter } from '../types';
 import { 
   MAP_SIZE, MOVE_SPEED_HUNTER, MOVE_SPEED_DEMON, MOVE_SPEED_DEER, 
   SHOOT_COOLDOWN, BULLET_SPEED, DEMON_EAT_BONUS, MAX_BULLETS,
@@ -12,6 +13,74 @@ export const distance = (a: Vector2, b: Vector2) => Math.sqrt((a.x - b.x) ** 2 +
 export const normalize = (v: Vector2): Vector2 => {
   const len = Math.sqrt(v.x * v.x + v.y * v.y);
   return len === 0 ? { x: 0, y: 0 } : { x: v.x / len, y: v.y / len };
+};
+
+// --- Interpolation Helpers ---
+export const lerp = (start: number, end: number, t: number) => {
+  return start + (end - start) * t;
+};
+
+export const lerpVector = (start: Vector2, end: Vector2, t: number): Vector2 => {
+  // If distance is too large (e.g. teleport), snap to end
+  if (Math.abs(start.x - end.x) > 100 || Math.abs(start.y - end.y) > 100) return end;
+  return {
+    x: lerp(start.x, end.x, t),
+    y: lerp(start.y, end.y, t)
+  };
+};
+
+// Client-side interpolation logic
+export const interpolateGameState = (current: GameState, target: GameState, dt: number): GameState => {
+  // Interpolation factor. 
+  // Higher = Snappier but more jitter if packet loss. 
+  // Lower = Smoother but more latency (floaty).
+  // 15.0 * dt roughly means covering distance quickly over frames.
+  const t = Math.min(1, 15.0 * dt);
+
+  const newState = { ...target }; // Copy non-positional data (phase, time, messages) directly from target
+
+  // Interpolate Hunter
+  newState.hunter = {
+    ...target.hunter,
+    pos: lerpVector(current.hunter.pos, target.hunter.pos, t)
+  };
+
+  // Interpolate Demon
+  newState.demon = {
+    ...target.demon,
+    pos: lerpVector(current.demon.pos, target.demon.pos, t)
+  };
+
+  // Interpolate Deers
+  // We match deers by ID to interpolate correctly
+  newState.deers = target.deers.map(targetDeer => {
+    const currentDeer = current.deers.find(d => d.id === targetDeer.id);
+    if (!currentDeer) return targetDeer; // New deer, snap to pos
+    return {
+      ...targetDeer,
+      pos: lerpVector(currentDeer.pos, targetDeer.pos, t),
+      // Use target angle or interpolate it too if needed, but direct assignment is usually fine for rotation
+      angle: targetDeer.angle 
+    };
+  });
+
+  // Interpolate Bullets
+  // Bullets are fast, snapping might be better, but lerping makes them look less choppy
+  newState.bullets = target.bullets.map((targetBullet, index) => {
+    // Try to find a corresponding bullet. 
+    // Since bullets don't have unique IDs in current types, we assume array order roughly matches.
+    // This is imperfect but better than nothing.
+    const currentBullet = current.bullets[index];
+    if (!currentBullet) return targetBullet;
+    return {
+      ...targetBullet,
+      pos: lerpVector(currentBullet.pos, targetBullet.pos, t)
+    };
+  });
+  
+  // Bushes and Trees are static, simple assignment (handled by object spread above) is fine.
+
+  return newState;
 };
 
 // Helper to add a message to state
@@ -36,7 +105,7 @@ const checkRectCircleCollision = (rectCenter: Vector2, rectHalfSize: number, cir
 };
 
 // --- Collision ---
-export const checkCollision = (pos: Vector2, radius: number, obstacles: Entity[]): boolean => {
+export const checkCollision = (pos: Vector2, radius: number, obstacles: Entity[], includeBushes: boolean = false): boolean => {
   // Map Boundaries
   if (pos.x < radius || pos.x > MAP_SIZE - radius || pos.y < radius || pos.y > MAP_SIZE - radius) {
     return true;
@@ -44,6 +113,9 @@ export const checkCollision = (pos: Vector2, radius: number, obstacles: Entity[]
 
   // Obstacles
   for (const obs of obstacles) {
+    // Bushes don't collide normally
+    if (!includeBushes && obs.type === EntityType.BUSH) continue;
+
     if (obs.type === EntityType.TREE) {
       // Square Collision for Trees
       const halfSize = obs.size * TREE_COLLISION_RATIO;
@@ -51,7 +123,7 @@ export const checkCollision = (pos: Vector2, radius: number, obstacles: Entity[]
         return true;
       }
     } else {
-      // Circle Collision for others (like Cabin)
+      // Circle Collision for others (like Cabin, Bushes)
       const dist = distance(pos, obs.pos);
       if (dist < radius + obs.size) {
         return true;
@@ -62,6 +134,8 @@ export const checkCollision = (pos: Vector2, radius: number, obstacles: Entity[]
 };
 
 // --- Line of Sight (Raycasting) ---
+// This is mainly used for server-side checks if needed, but primary vision is in GameCanvas.
+// Updated to include bushes as blockers
 export const hasLineOfSight = (p1: Vector2, p2: Vector2, obstacles: Entity[]): boolean => {
   const distTotal = distance(p1, p2);
   const dir = { x: (p2.x - p1.x) / distTotal, y: (p2.y - p1.y) / distTotal };
@@ -86,7 +160,7 @@ export const hasLineOfSight = (p1: Vector2, p2: Vector2, obstacles: Entity[]): b
           return false; // Blocked
         }
       } else {
-        // Circle blockage
+        // Circle blockage (Cabin, Bush)
         let obsRadius = obs.size; 
         if (distance(checkPos, obs.pos) < obsRadius) {
           return false; // Blocked
@@ -150,7 +224,7 @@ export const calculateBotInput = (
 
   } else {
     // --- HUNTER AI LOGIC ---
-    const hunter = me as Hunter;
+    const hunter = me as unknown as Hunter;
     // Initialize AI state if missing
     if (!hunter.aiState) {
         hunter.aiState = { mode: 'IDLE', targetPos: null, waitTimer: 0 };
@@ -259,6 +333,8 @@ export const calculateBotInput = (
 
   // 2. Obstacle Avoidance (Repulsion & Slide)
   for (const obs of obstacles) {
+    if (obs.type === EntityType.BUSH) continue; // Don't avoid bushes
+
     const dist = distance(myPos, obs.pos);
     const avoidRadius = obs.size + 40; 
     
@@ -319,7 +395,7 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       .map(m => ({ ...m, timeLeft: m.timeLeft - dt }))
       .filter(m => m.timeLeft > 0);
 
-  const obstacles = [...state.trees, state.cabin];
+  const obstacles = [...state.trees, state.cabin]; // Bushes excluded from collision obstacles
 
   // Scale factor for frame-based logic (defaults were tuned for 60fps)
   const frameScale = dt * FPS;
@@ -357,6 +433,8 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
         // Respawn Mushrooms (Scattered)
         const newMushrooms: Entity[] = [];
         const MIN_MUSHROOM_DIST = 100;
+        // Include bushes for spawning checks
+        const spawnObstacles = [...obstacles, ...newState.bushes];
 
         for (let i = 0; i < 10; i++) {
            let pos = { x: 0, y: 0 };
@@ -367,8 +445,8 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
              attempts++;
              pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
              
-             // Check collisions with obstacles
-             if (checkCollision(pos, 10, obstacles)) continue;
+             // Check collisions with obstacles including bushes
+             if (checkCollision(pos, 10, spawnObstacles, true)) continue;
              
              // Check distance from other new mushrooms to ensure scatter
              let tooClose = false;
@@ -579,7 +657,7 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
 
   // 8. AI Deer wandering
   newState.deers = newState.deers.map(deer => {
-    const ai = (deer.aiState as DeerAIState) || { moving: false, timer: 0 };
+    const ai = (deer.aiState as any) || { moving: false, timer: 0 };
     let newAi = { ...ai };
     newAi.timer -= frameScale;
 

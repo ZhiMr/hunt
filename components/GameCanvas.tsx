@@ -1,6 +1,7 @@
+
 import React, { useRef, useEffect } from 'react';
 import { GameState, Entity, EntityType, Vector2 } from '../types';
-import { COLORS, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT, VISION_RADIUS_DIM, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, MAP_SIZE, TREE_COLLISION_RATIO, RENDER_SCALE } from '../constants';
+import { COLORS, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT, VISION_RADIUS_BUSH, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, MAP_SIZE, TREE_COLLISION_RATIO, RENDER_SCALE } from '../constants';
 import { distance } from '../utils/gameLogic';
 
 interface GameCanvasProps {
@@ -8,8 +9,68 @@ interface GameCanvasProps {
   cameraTarget: 'HUNTER' | 'DEMON';
 }
 
+// --- Deterministic Bush Particle Generator ---
+// Extracted to ensure Silhouette and Color pass match exactly
+const getBushParticles = (entity: Entity) => {
+    const seed = Math.floor(entity.pos.x * 1000 + entity.pos.y);
+    const rand = ((s) => {
+        let val = s;
+        return () => {
+            val = (val * 9301 + 49297) % 233280;
+            return val / 233280;
+        };
+    })(seed);
+
+    const bushColors = [
+        '#022c22', // teal-950
+        '#064e3b', // teal-900 
+        '#065f46', // teal-800
+        '#115e59', // teal-800
+        '#134e4a'  // teal-900
+    ];
+
+    const leaves = [];
+    // 1. Dark Base
+    leaves.push({ x: 0, y: 0, r: entity.size * 0.9, color: bushColors[0] });
+
+    // 2. Fluffy Leaves
+    const numLeaves = 15;
+    for (let i = 0; i < numLeaves; i++) {
+        const angle = rand() * Math.PI * 2;
+        const dist = Math.sqrt(rand()) * entity.size * 0.9;
+        const lx = Math.cos(angle) * dist;
+        const ly = Math.sin(angle) * dist;
+        const lSize = entity.size * (0.35 + rand() * 0.25);
+
+        let colorScore = rand(); 
+        if (ly < -entity.size * 0.2) colorScore += 0.3; 
+        if (lx < -entity.size * 0.2) colorScore += 0.2; 
+        if (ly > entity.size * 0.3) colorScore -= 0.3; 
+
+        let colorIdx = Math.floor(colorScore * bushColors.length);
+        colorIdx = Math.max(0, Math.min(colorIdx, bushColors.length - 1));
+        
+        leaves.push({ x: lx, y: ly, r: lSize, color: bushColors[colorIdx] });
+    }
+
+    // 3. Berries
+    const berries = [];
+    const numBerries = 3 + Math.floor(rand() * 3);
+    for (let i = 0; i < numBerries; i++) {
+        const angle = rand() * Math.PI * 2;
+        const dist = Math.sqrt(rand()) * entity.size * 0.8;
+        const bx = Math.cos(angle) * dist;
+        const by = Math.sin(angle) * dist;
+        const bSize = entity.size * 0.15;
+        berries.push({ x: bx, y: by, r: bSize, color: '#fde047' });
+    }
+
+    return { leaves, berries };
+};
+
 const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const bushBufferRef = useRef<HTMLCanvasElement | null>(null); // Offscreen buffer for transparent bushes
   
   // Refs for smoothing vision
   const prevDistancesRef = useRef<Float32Array | null>(null);
@@ -17,14 +78,18 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
   // --- Rendering Helpers ---
   const drawEntity = (ctx: CanvasRenderingContext2D, entity: Entity, color: string, isDemon = false) => {
+    if (!entity || !entity.pos) return; // Safety Check
+
     ctx.save();
     ctx.translate(entity.pos.x, entity.pos.y);
     
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath();
-    ctx.ellipse(2, 4, entity.size, entity.size * 0.6, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // Shadow (Ground shadow) - Only for non-bush entities, bush shadow handled in silhouette
+    if (entity.type !== EntityType.BUSH) {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(2, 4, entity.size, entity.size * 0.6, 0, 0, Math.PI * 2);
+        ctx.fill();
+    }
 
     // Body
     ctx.fillStyle = color;
@@ -63,6 +128,15 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
       ctx.beginPath();
       ctx.arc(0, 0, 6, Math.PI, 0);
       ctx.fill();
+    } else if (entity.type === EntityType.BUSH) {
+      // Logic handled in main loop for transparency, but this is fallback for standard draw
+      const parts = getBushParticles(entity);
+      parts.leaves.forEach(p => {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = p.color; ctx.fill();
+      });
+      parts.berries.forEach(p => {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = p.color; ctx.fill();
+      });
     } else {
       // Characters (Hunter, Demon, Deer)
       ctx.rotate(entity.angle);
@@ -170,6 +244,12 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: false }); // Optimize alpha
     if (!ctx) return;
+    
+    // Init Offscreen Buffer
+    if (!bushBufferRef.current) {
+        bushBufferRef.current = document.createElement('canvas');
+    }
+    const bufferCtx = bushBufferRef.current.getContext('2d');
 
     // --- Render Setup ---
     // Reset transform to clear the entire physical canvas
@@ -184,6 +264,17 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
     // --- Camera Logic ---
     const targetEntity = cameraTarget === 'HUNTER' ? gameState.hunter : gameState.demon;
+    
+    // Safety check for camera target existence
+    if (!targetEntity || !targetEntity.pos) {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+        ctx.fillStyle = '#666';
+        ctx.font = '20px monospace';
+        ctx.fillText("WAITING FOR SYNC...", 20, 40);
+        return;
+    }
+
     let camX = targetEntity.pos.x - VIEWPORT_WIDTH / 2;
     let camY = targetEntity.pos.y - VIEWPORT_HEIGHT / 2;
 
@@ -198,10 +289,12 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     ctx.fillStyle = gameState.isNight ? '#052e16' : '#15803d'; // Darker versions for Fog
     ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
     
-    // 2. Static Objects (Dim - Fogged)
-    const allObstacles = [...gameState.trees, gameState.cabin];
+    // 2. Static Objects (Dim - Fogged / Silhouette)
+    const allObstacles = [...(gameState.trees || []), ...(gameState.bushes || []), gameState.cabin].filter(Boolean);
+    
     // Draw dim versions
     allObstacles.forEach(obj => {
+       if (!obj) return;
        ctx.save();
        ctx.translate(obj.pos.x, obj.pos.y);
        ctx.fillStyle = '#222'; // Silhouette
@@ -226,6 +319,16 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
          ctx.lineTo(-obj.size, -obj.size * 0.5);
          ctx.fill();
        }
+       else if (obj.type === EntityType.BUSH) {
+         // SILHOUETTE PASS
+         // Use the EXACT same particle logic to draw the silhouette
+         // This ensures the shadow shape matches the lit shape perfectly
+         const parts = getBushParticles(obj);
+         parts.leaves.forEach(p => {
+             ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+         });
+         // Berries not drawn in silhouette
+       }
        else { ctx.beginPath(); ctx.arc(0,0, obj.size, 0, Math.PI*2); ctx.fill(); }
        ctx.restore();
     });
@@ -234,7 +337,19 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
     // 3. Vision Calculation (Fog of War) - OPTIMIZED
     const visionSource = targetEntity; 
-    const visionRadius = gameState.isNight ? VISION_RADIUS_NIGHT : VISION_RADIUS_DAY;
+    let visionRadius = gameState.isNight ? VISION_RADIUS_NIGHT : VISION_RADIUS_DAY;
+    
+    // Check if inside a bush (kept for vision reduction mechanics if needed, though bushes are now transparent to rays)
+    let insideBushId: string | null = null;
+    const bushList = gameState.bushes || [];
+    for (const bush of bushList) {
+        if (distance(visionSource.pos, bush.pos) < bush.size) {
+            insideBushId = bush.id;
+            visionRadius = VISION_RADIUS_BUSH; // Reduced vision inside bush
+            break;
+        }
+    }
+
     const visionSourceScreenPos = { x: visionSource.pos.x - camX, y: visionSource.pos.y - camY };
 
     // Reset smoothing if position changed dramatically (teleport/respawn) to avoid lag lines
@@ -243,8 +358,11 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     }
     lastSourcePosRef.current = { ...visionSource.pos };
 
-    // Pre-filter obstacles that are close enough to matter to save cycles
+    // Pre-filter obstacles that are close enough to matter
+    // EXCLUDE BUSHES from vision blocking to allow seeing "through" them (transparency)
     const nearbyObstacles = allObstacles.filter(obj => 
+        obj && 
+        obj.type !== EntityType.BUSH && // CHANGE: Bushes do not block vision rays
         distance(visionSource.pos, obj.pos) < visionRadius + obj.size
     );
 
@@ -279,7 +397,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
          } else if (obs.type === EntityType.CABIN) {
             // Cabin is a box
             dist = intersectRayAABB(visionSource.pos, dir, obs.pos, obs.size);
-         }
+         } 
+         // Bushes skipped
 
          if (dist !== null && dist < closestDist) {
            closestDist = dist;
@@ -322,53 +441,121 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     ctx.fillStyle = gameState.isNight ? COLORS.GROUND_NIGHT : COLORS.GROUND_DAY;
     ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
     
-    // Bright Static Objects
-    [gameState.cabin, ...gameState.trees, ...gameState.mushrooms].forEach(obj => {
-       drawEntity(ctx, obj, obj.type === EntityType.TREE ? COLORS.TREE : obj.type === EntityType.CABIN ? COLORS.CABIN : COLORS.MUSHROOM);
+    // Bright Static Objects (EXCLUDING BUSHES for Z-Sorting)
+    const brightObjects = [gameState.cabin, ...(gameState.trees || []), ...(gameState.mushrooms || [])].filter(Boolean);
+    const bushObjects = (gameState.bushes || []).filter(Boolean);
+
+    // Draw non-bush statics (Ground level)
+    brightObjects.forEach(obj => {
+       drawEntity(ctx, obj, 
+           obj.type === EntityType.TREE ? COLORS.TREE : 
+           obj.type === EntityType.CABIN ? COLORS.CABIN : 
+           COLORS.MUSHROOM
+       );
     });
 
-    // Entities
-    [...gameState.deers].forEach(deer => drawEntity(ctx, deer, COLORS.DEER));
-    drawEntity(ctx, gameState.demon, gameState.isNight ? COLORS.DEMON_NIGHT : COLORS.DEMON_DAY, gameState.isNight);
+    // Draw Entities (Middle Layer)
+    [...(gameState.deers || [])].forEach(deer => drawEntity(ctx, deer, COLORS.DEER));
     
-    // Only draw hunter if NOT in cabin
-    if (!gameState.hunter.inCabin) {
-        drawEntity(ctx, gameState.hunter, COLORS.HUNTER);
+    if (gameState.demon) {
+       drawEntity(ctx, gameState.demon, gameState.isNight ? COLORS.DEMON_NIGHT : COLORS.DEMON_DAY, gameState.isNight);
     }
     
-    // Bullets
+    // Only draw hunter if NOT in cabin
+    if (gameState.hunter && !gameState.hunter.inCabin) {
+        drawEntity(ctx, gameState.hunter, COLORS.HUNTER);
+    }
+
+    // Draw Bushes (Top Layer - Covers entities)
+    bushObjects.forEach(obj => {
+        const isMeInside = distance(targetEntity.pos, obj.pos) < obj.size;
+        
+        // If inside, use offscreen buffer to create a uniform transparent layer
+        if (isMeInside && bushBufferRef.current && bufferCtx) {
+             const bufferSize = Math.ceil(obj.size * 2.5);
+             if (bushBufferRef.current.width !== bufferSize || bushBufferRef.current.height !== bufferSize) {
+                 bushBufferRef.current.width = bufferSize;
+                 bushBufferRef.current.height = bufferSize;
+             }
+             bufferCtx.clearRect(0, 0, bufferSize, bufferSize);
+             bufferCtx.save();
+             // Center in buffer
+             bufferCtx.translate(bufferSize/2, bufferSize/2);
+             
+             // Draw Bush Particles to Buffer
+             const parts = getBushParticles(obj);
+             parts.leaves.forEach(p => {
+                bufferCtx.beginPath(); 
+                bufferCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2); 
+                bufferCtx.fillStyle = p.color; 
+                bufferCtx.fill();
+             });
+             parts.berries.forEach(p => {
+                bufferCtx.beginPath(); 
+                bufferCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2); 
+                bufferCtx.fillStyle = p.color; 
+                bufferCtx.fill();
+             });
+             bufferCtx.restore();
+
+             // Draw Buffer to Main Screen with Low Alpha
+             ctx.save();
+             ctx.globalAlpha = 0.3; // Very Transparent
+             ctx.drawImage(bushBufferRef.current, obj.pos.x - bufferSize/2, obj.pos.y - bufferSize/2);
+             ctx.restore();
+        } 
+        else {
+             // Normal Draw (Direct)
+             ctx.save();
+             ctx.translate(obj.pos.x, obj.pos.y);
+             const parts = getBushParticles(obj);
+             parts.leaves.forEach(p => {
+                 ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = p.color; ctx.fill();
+             });
+             parts.berries.forEach(p => {
+                 ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = p.color; ctx.fill();
+             });
+             ctx.restore();
+        }
+    });
+    
+    // Bullets (Top-most)
     ctx.fillStyle = '#fbbf24';
-    gameState.bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, 3, 0, Math.PI * 2); ctx.fill(); });
+    (gameState.bullets || []).forEach(b => { 
+        if(b && b.pos) {
+            ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, 3, 0, Math.PI * 2); ctx.fill(); 
+        }
+    });
 
     ctx.restore();
 
     // 5. Overlay Effects (Demon Tracking)
-    // Drawn outside of clip to ensure visibility if needed (though it should be local to demon)
-    // Drawing it in world space (after restore but before final return)
-    if (gameState.isNight && gameState.demon.trackingActiveTime > 0) {
+    if (gameState.isNight && gameState.demon && gameState.demon.trackingActiveTime > 0) {
         ctx.save();
         ctx.translate(-camX, -camY); // Back to World Space
         ctx.translate(gameState.demon.pos.x, gameState.demon.pos.y);
         
-        const dx = gameState.hunter.pos.x - gameState.demon.pos.x;
-        const dy = gameState.hunter.pos.y - gameState.demon.pos.y;
-        const angle = Math.atan2(dy, dx);
-        
-        ctx.rotate(angle);
-        
-        // Draw Red Arrow
-        const dist = 45; // Distance from center
-        ctx.fillStyle = '#ef4444'; 
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        
-        ctx.beginPath();
-        ctx.moveTo(dist, 0);
-        ctx.lineTo(dist - 12, -6);
-        ctx.lineTo(dist - 12, 6);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
+        if (gameState.hunter && gameState.hunter.pos) {
+            const dx = gameState.hunter.pos.x - gameState.demon.pos.x;
+            const dy = gameState.hunter.pos.y - gameState.demon.pos.y;
+            const angle = Math.atan2(dy, dx);
+            
+            ctx.rotate(angle);
+            
+            // Draw Red Arrow
+            const dist = 45; // Distance from center
+            ctx.fillStyle = '#ef4444'; 
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            
+            ctx.beginPath();
+            ctx.moveTo(dist, 0);
+            ctx.lineTo(dist - 12, -6);
+            ctx.lineTo(dist - 12, 6);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
 
         ctx.restore();
     }

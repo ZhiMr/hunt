@@ -1,3 +1,4 @@
+
 export enum GamePhase {
   MENU = 'MENU',
   LOBBY = 'LOBBY',
@@ -16,7 +17,8 @@ export enum EntityType {
   DEER = 'DEER',
   TREE = 'TREE',
   CABIN = 'CABIN',
-  MUSHROOM = 'MUSHROOM'
+  MUSHROOM = 'MUSHROOM',
+  BUSH = 'BUSH'
 }
 
 export interface DeerAIState {
@@ -75,6 +77,7 @@ export interface GameState {
   demon: Demon;
   deers: Entity[];
   trees: Entity[];
+  bushes: Entity[];
   mushrooms: Entity[];
   bullets: Array<{ pos: Vector2; velocity: Vector2; active: boolean }>;
   cabin: Entity;
@@ -114,9 +117,13 @@ export enum GameMode {
   ONLINE_CLIENT = 'ONLINE_CLIENT' // Client vs Remote Host
 }
 
+export type OpponentMode = 'WAITING' | 'COMPUTER' | 'CONNECTED';
+
 export type NetworkMessage = 
   | { type: 'STATE_UPDATE'; state: GameState }
   | { type: 'INPUT_UPDATE'; input: PlayerInput }
   | { type: 'PLAYER_JOINED'; role: PlayerRole }
   | { type: 'LOBBY_UPDATE'; hostRole: EntityType }
-  | { type: 'START_GAME'; clientRole: EntityType; initialState: GameState };
+  | { type: 'START_GAME'; clientRole: EntityType; initialState: GameState }
+  | { type: 'PING'; timestamp: number }
+  | { type: 'PONG'; timestamp: number };

@@ -1,11 +1,36 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import GameCanvas from './components/GameCanvas';
 import { MobileControls } from './components/MobileControls';
-import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerRole, PlayerInput } from './types';
-import { MAP_SIZE, MAX_BULLETS, VIEWPORT_WIDTH, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
-import { updateGame, checkCollision, distance, calculateBotInput } from './utils/gameLogic';
-import { Gamepad2, Skull, Play, RefreshCw, Users, Monitor, Link, ArrowRight, Copy, Check, Info, LockKeyhole, User, UserPlus, LogOut, BookOpen, X, Signal, Loader2, WifiOff, Activity, AlertTriangle } from 'lucide-react';
+import { MainMenu } from './components/ui/MainMenu';
+import { Lobby } from './components/ui/Lobby';
+import { RulesModal } from './components/ui/RulesModal';
+import { JoinModal } from './components/ui/JoinModal';
+import { GameHUD } from './components/ui/GameHUD';
+import { GameOverModal } from './components/ui/GameOverModal';
+import { GameState, GamePhase, InputState, EntityType, Entity, GameMode, PlayerInput, OpponentMode } from './types';
+import { MAP_SIZE, MAX_BULLETS, DAY_DURATION_SECONDS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS } from './constants';
+import { updateGame, checkCollision, distance, calculateBotInput, interpolateGameState } from './utils/gameLogic';
+import { LogOut, Signal, WifiOff } from 'lucide-react';
 import Peer, { DataConnection } from 'peerjs';
+
+// --- Web Worker for Host Loop (Prevents throttling) ---
+const WORKER_CODE = `
+let intervalId = null;
+self.onmessage = function(e) {
+  if (e.data === 'START') {
+    if (intervalId) clearInterval(intervalId);
+    intervalId = setInterval(() => {
+      self.postMessage('TICK');
+    }, 1000 / 60);
+  } else if (e.data === 'STOP') {
+    if (intervalId) clearInterval(intervalId);
+    intervalId = null;
+  }
+};
+`;
+const WORKER_BLOB = new Blob([WORKER_CODE], { type: 'application/javascript' });
+const WORKER_URL = URL.createObjectURL(WORKER_BLOB);
 
 // --- Production Network Config ---
 const PEER_CONFIG = {
@@ -23,7 +48,7 @@ const PEER_CONFIG = {
 
 // Helper to round entity for network transmission
 const roundEntity = (e: any) => {
-    if (!e || !e.pos) return e; // Safety check
+    if (!e || !e.pos) return e; 
     return {
         ...e,
         pos: { x: Math.round(e.pos.x), y: Math.round(e.pos.y) },
@@ -34,19 +59,15 @@ const roundEntity = (e: any) => {
 // --- Initial State Factory ---
 const createInitialState = (): GameState => {
   const center = { x: MAP_SIZE / 2, y: MAP_SIZE / 2 };
-  
-  // 1. Create Cabin first to use for collision checks
   const cabin: Entity = {
     id: 'cabin',
     type: EntityType.CABIN,
     pos: { ...center },
-    size: 25, // Smaller Cabin
+    size: 25,
     angle: 0
   };
 
   const obstacles: Entity[] = [cabin];
-
-  // 2. Generate Trees (checking against Cabin and other Trees)
   const trees: Entity[] = [];
   const MAX_TREES = 40;
   const MIN_TREE_GAP = 60; 
@@ -56,80 +77,52 @@ const createInitialState = (): GameState => {
     attempts++;
     const size = 20 + Math.random() * 15;
     const pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
-    
-    // Use checkCollision logic or custom distance for spawn logic
     let valid = true;
-    
-    // Check against existing trees
     for (const tree of trees) {
       if (distance(pos, tree.pos) < (size + tree.size + MIN_TREE_GAP)) {
         valid = false;
         break;
       }
     }
-    // Check against Cabin (center)
     if (distance(pos, cabin.pos) < 150) valid = false;
 
     if (valid) {
-      const newTree = {
-        id: `tree-${trees.length}`,
-        type: EntityType.TREE,
-        pos,
-        size,
-        angle: 0
-      };
+      const newTree = { id: `tree-${trees.length}`, type: EntityType.TREE, pos, size, angle: 0 };
       trees.push(newTree);
-      obstacles.push(newTree); // Add to obstacles for subsequent checks
+      obstacles.push(newTree);
     }
   }
 
-  // 3. Generate Deers (checking against Trees and Cabin)
   const deers: Entity[] = [];
   for (let i = 0; i < 15; i++) {
     let pos = { x: 0, y: 0 };
     let valid = false;
     let spawnAttempts = 0;
-
-    // Try to find a valid spot
     while(!valid && spawnAttempts < 50) {
         spawnAttempts++;
         pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
-        // Check collision with radius 12 (deer size)
-        if (!checkCollision(pos, 12, obstacles)) {
-            valid = true;
-        }
+        if (!checkCollision(pos, 12, obstacles)) valid = true;
     }
-
     deers.push({
       id: `deer-${i}`,
       type: EntityType.DEER,
-      pos: valid ? pos : { x: 50, y: 50 }, // Fallback to corner if failed
+      pos: valid ? pos : { x: 50, y: 50 },
       size: 12,
-      angle: Math.floor(Math.random() * 8) * (Math.PI / 4), // 8-way direction
-      aiState: {
-        moving: Math.random() > 0.5,
-        timer: Math.floor(Math.random() * 100) + 50
-      }
+      angle: Math.floor(Math.random() * 8) * (Math.PI / 4),
+      aiState: { moving: Math.random() > 0.5, timer: Math.floor(Math.random() * 100) + 50 }
     });
   }
 
-  // Generate Mushrooms (Scattered)
   const mushrooms: Entity[] = [];
   const MIN_MUSHROOM_DIST = 100;
-
   for (let i = 0; i < 10; i++) {
     let pos = { x: 0, y: 0 };
     let valid = false;
     let spawnAttempts = 0;
-
     while(!valid && spawnAttempts < 20) {
       spawnAttempts++;
       pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
-      
-      // Check collision with trees/cabin
       if (checkCollision(pos, 10, obstacles)) continue;
-
-      // Check distance from other mushrooms
       let tooClose = false;
       for (const other of mushrooms) {
           if (distance(pos, other.pos) < MIN_MUSHROOM_DIST) {
@@ -139,21 +132,14 @@ const createInitialState = (): GameState => {
       }
       if (!tooClose) valid = true;
     }
-
-    mushrooms.push({
-      id: `mush-${i}`,
-      type: EntityType.MUSHROOM,
-      pos,
-      size: 8,
-      angle: 0
-    });
+    mushrooms.push({ id: `mush-${i}`, type: EntityType.MUSHROOM, pos, size: 8, angle: 0 });
   }
 
   return {
-    phase: GamePhase.MENU, // Start at Menu
+    phase: GamePhase.MENU,
     timeOfDay: 0,
     isNight: false,
-    nightTimer: 0, // Initialize night timer
+    nightTimer: 0,
     hunter: {
       id: 'hunter',
       type: EntityType.HUNTER,
@@ -201,14 +187,12 @@ const generateRoomId = () => {
     return result;
 };
 
-type OpponentMode = 'WAITING' | 'COMPUTER' | 'CONNECTED';
-
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(createInitialState());
+  const targetGameStateRef = useRef<GameState | null>(null); // For client interpolation
   
   // Lobby State
   const [roomId, setRoomId] = useState<string>("");
-  const [joinId, setJoinId] = useState<string>("");
   const [gameMode, setGameMode] = useState<GameMode>(GameMode.SINGLE_PLAYER);
   const [isCopied, setIsCopied] = useState(false);
   const [showRules, setShowRules] = useState(false);
@@ -226,10 +210,8 @@ const App: React.FC = () => {
   const [isLagging, setIsLagging] = useState(false);
   const lastPacketTimeRef = useRef<number>(0);
   
-  // CRITICAL: Prevents updates before initialization
   const gameStartedRef = useRef<boolean>(false); 
   
-  // DEBUGGING
   const packetCountRef = useRef<number>(0);
   const [lastError, setLastError] = useState<string>("");
 
@@ -241,6 +223,9 @@ const App: React.FC = () => {
   const inputTickRef = useRef<number>(0);
   const pingIntervalRef = useRef<number | null>(null);
   
+  // Worker Ref for Host Loop
+  const workerRef = useRef<Worker | null>(null);
+
   // Input Refs
   const inputRef = useRef<InputState>({
     w: false, a: false, s: false, d: false, space: false,
@@ -253,6 +238,14 @@ const App: React.FC = () => {
   const requestRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
 
+  // Init Worker
+  useEffect(() => {
+    workerRef.current = new Worker(WORKER_URL);
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       if (peerRef.current) peerRef.current.destroy();
@@ -262,7 +255,11 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const checkMobile = () => {
-      setIsMobile('ontouchstart' in window || navigator.maxTouchPoints > 0 || window.innerWidth < 768);
+      // Only treat as mobile if touch is supported AND screen is small (less than 1024px)
+      // This prevents touch-enabled laptops or large tablets from showing on-screen controls
+      const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      const isSmallScreen = window.innerWidth < 1024;
+      setIsMobile(isTouch && isSmallScreen);
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);
@@ -393,10 +390,8 @@ const App: React.FC = () => {
     peerRef.current = peer;
   };
 
-  const joinGame = () => {
+  const joinGame = (code: string) => {
     setJoinError("");
-    if (!joinId) { setJoinError("请输入房间号"); return; }
-    
     setIsConnecting(true);
     if (peerRef.current) peerRef.current.destroy();
 
@@ -412,7 +407,7 @@ const App: React.FC = () => {
 
     peer.on('open', (id) => {
       if (peer !== peerRef.current) return;
-      const conn = peer.connect(joinId.trim().toUpperCase(), { reliable: true });
+      const conn = peer.connect(code, { reliable: true });
       
       const timeout = setTimeout(() => {
           if (peerRef.current === peer && opponentMode !== 'CONNECTED') {
@@ -425,11 +420,11 @@ const App: React.FC = () => {
       conn.on('open', () => {
         clearTimeout(timeout);
         if (peer !== peerRef.current) return;
-        console.log("Connected to: " + joinId);
+        console.log("Connected to: " + code);
         setJoinError(""); 
         setIsConnecting(false);
         setShowJoinPanel(false); 
-        setRoomId(joinId);
+        setRoomId(code);
         setGameMode(GameMode.ONLINE_CLIENT);
         isHostRef.current = false;
         lastPacketTimeRef.current = Date.now();
@@ -452,27 +447,39 @@ const App: React.FC = () => {
             if (data.type === 'LOBBY_UPDATE') {
                 setMyRole(data.hostRole === EntityType.HUNTER ? EntityType.DEMON : EntityType.HUNTER);
             } else if (data.type === 'START_GAME') {
-                // LOCK: Enable processing of state updates
                 gameStartedRef.current = true;
                 if (data.clientRole) setMyRole(data.clientRole);
                 if (data.initialState) {
                     setGameState(data.initialState);
+                    targetGameStateRef.current = data.initialState; // Initialize target
                     lastTimeRef.current = 0; 
                 }
             } else if (data.type === 'STATE_UPDATE') {
-                // CRITICAL LOCK CHECK
                 if (!gameStartedRef.current) return;
-
-                setGameState(prev => ({
-                    ...prev,
+                
+                // Construct the full state from the update (merging static assets if needed)
+                // BUG FIX: Strictly use targetGameStateRef.current. If missing, wait for START_GAME.
+                // Do NOT fallback to 'gameState' (local state) as it has different random seed (trees).
+                const baseState = targetGameStateRef.current;
+                
+                if (!baseState) return; // Ignore updates until START_GAME initializes the map
+                
+                const fullStateUpdate = {
+                    ...baseState, 
                     ...data.state,
-                    // FORCE FALLBACK TO EMPTY ARRAYS TO PREVENT UNDEFINED
-                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : (prev.trees || []),
-                    cabin: data.state.cabin ? data.state.cabin : (prev.cabin || createInitialState().cabin),
-                    mushrooms: data.state.mushrooms || prev.mushrooms || [],
-                    deers: data.state.deers || prev.deers || [],
-                    bullets: data.state.bullets || prev.bullets || [],
-                }));
+                    // Ensure critical arrays are present.
+                    // If Host sends sparse updates for trees (which it likely does to save bandwidth),
+                    // we MUST preserve the trees from the Base State (which came from START_GAME).
+                    trees: (data.state.trees && data.state.trees.length > 0) ? data.state.trees : (baseState.trees || []),
+                    cabin: data.state.cabin ? data.state.cabin : (baseState.cabin || createInitialState().cabin),
+                    mushrooms: data.state.mushrooms || baseState.mushrooms || [],
+                    deers: data.state.deers || baseState.deers || [],
+                    bullets: data.state.bullets || baseState.bullets || [],
+                };
+                
+                // Update the "Target" state for interpolation loop to chase
+                targetGameStateRef.current = fullStateUpdate;
+
             } else if (data.type === 'PING') {
                 try { conn.send({ type: 'PONG', timestamp: data.timestamp }); } catch(e){}
             } else if (data.type === 'PONG') {
@@ -508,7 +515,6 @@ const App: React.FC = () => {
     }
 
     const newState = createInitialState();
-    // Host Authoritative Spawn
     const obstacles = [...newState.trees, newState.cabin];
     let valid = false;
     let spawnPos = { x: 100, y: 100 };
@@ -544,11 +550,11 @@ const App: React.FC = () => {
     const safeDelta = Math.min(deltaTime, 0.1); 
 
     if (gameMode === GameMode.ONLINE_CLIENT) {
-        // Lag Watchdog
         if (opponentMode === 'CONNECTED') {
             if (Date.now() - lastPacketTimeRef.current > 2500 && !isLagging) setIsLagging(true);
         }
 
+        // Send Input
         inputTickRef.current += deltaTime;
         if (inputTickRef.current >= 0.033) { 
             if (connRef.current && connRef.current.open) {
@@ -563,11 +569,24 @@ const App: React.FC = () => {
             }
             inputTickRef.current = 0;
         }
+
+        // Client-side Interpolation Loop
+        if (gameStartedRef.current && targetGameStateRef.current) {
+            setGameState(prev => {
+                // If phase changed (e.g. Game Over), switch immediately
+                if (targetGameStateRef.current!.phase !== prev.phase) {
+                    return targetGameStateRef.current!;
+                }
+                // Otherwise, interpolate positions
+                return interpolateGameState(prev, targetGameStateRef.current!, safeDelta);
+            });
+        }
+        
+        // Client always uses RAF for smooth rendering/interpolation
         requestRef.current = requestAnimationFrame(loop);
         return; 
     }
 
-    // Host/Single Loop
     setGameState(prev => {
       if (prev.phase !== GamePhase.PLAYING) return prev;
 
@@ -616,12 +635,34 @@ const App: React.FC = () => {
       }
       return nextState;
     });
-    requestRef.current = requestAnimationFrame(loop);
+    
+    // Recursive call ONLY if not HOST (Host is driven by Worker)
+    if (gameMode !== GameMode.ONLINE_HOST) {
+        requestRef.current = requestAnimationFrame(loop);
+    }
   };
 
   useEffect(() => {
-    requestRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(requestRef.current!);
+    // If ONLINE_HOST, use Web Worker to drive the loop to prevent background throttling
+    if (gameMode === GameMode.ONLINE_HOST) {
+        if (workerRef.current) {
+            workerRef.current.onmessage = (e) => {
+                if (e.data === 'TICK') {
+                    // Drive the loop manually
+                    loop(performance.now());
+                }
+            };
+            workerRef.current.postMessage('START');
+        }
+        return () => {
+            workerRef.current?.postMessage('STOP');
+        };
+    } else {
+        // Single Player or Client uses RAF
+        workerRef.current?.postMessage('STOP');
+        requestRef.current = requestAnimationFrame(loop);
+        return () => cancelAnimationFrame(requestRef.current!);
+    }
   }, [gameMode, myRole, opponentMode]); 
 
   const handleCopy = () => {
@@ -630,296 +671,12 @@ const App: React.FC = () => {
     setTimeout(() => setIsCopied(false), 2000);
   };
 
-  const renderJoinPanel = () => (
-      <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-md w-full p-8 relative shadow-2xl flex flex-col items-center gap-6">
-              <button 
-                  onClick={() => !isConnecting && setShowJoinPanel(false)}
-                  className="absolute top-4 right-4 text-stone-400 hover:text-white disabled:opacity-50"
-                  disabled={isConnecting}
-              >
-                  <X size={24} />
-              </button>
-              
-              <h2 className="text-3xl font-bold text-stone-200 flex items-center gap-2">
-                  <Link size={28} className="text-blue-400"/> 加入游戏
-              </h2>
-              
-              <div className="w-full flex flex-col gap-2">
-                  <label className="text-xs text-stone-400 uppercase font-bold tracking-wider ml-1">输入房间号</label>
-                  <input 
-                      type="text" 
-                      placeholder="CODE" 
-                      className={`w-full bg-stone-900 border-2 rounded-lg p-4 text-center text-3xl font-mono tracking-widest text-white uppercase focus:outline-none focus:ring-2 transition-all disabled:opacity-50
-                          ${joinError ? 'border-red-500 focus:ring-red-500/50' : 'border-stone-700 focus:border-blue-500 focus:ring-blue-500/50'}`}
-                      onChange={(e) => {
-                          setJoinId(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''));
-                          if(joinError) setJoinError("");
-                      }}
-                      value={joinId}
-                      maxLength={6}
-                      disabled={isConnecting}
-                  />
-                  {joinError && (
-                      <span className="text-sm text-red-500 font-bold text-center animate-pulse flex items-center justify-center gap-1">
-                          <Info size={14}/> {joinError}
-                      </span>
-                  )}
-              </div>
-
-              <button 
-                  onClick={joinGame}
-                  disabled={isConnecting}
-                  className={`w-full py-4 text-white rounded-lg font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-all
-                      ${isConnecting 
-                          ? 'bg-stone-600 cursor-not-allowed' 
-                          : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/20 active:scale-95'}`}
-              >
-                  {isConnecting ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />} 
-                  {isConnecting ? "连接中..." : "连接房间"}
-              </button>
-          </div>
-      </div>
-  );
-
-  const renderRules = () => (
-      <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-neutral-800 border border-stone-600 rounded-lg max-w-2xl w-full p-6 relative shadow-2xl overflow-y-auto max-h-[90vh]">
-              <button 
-                  onClick={() => setShowRules(false)}
-                  className="absolute top-4 right-4 text-stone-400 hover:text-white"
-              >
-                  <X size={24} />
-              </button>
-              <h2 className="text-3xl font-bold text-green-400 mb-6 flex items-center gap-2"><BookOpen /> 游戏规则</h2>
-              <div className="space-y-6 text-stone-300">
-                  <section>
-                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">1. 角色目标</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div className="bg-red-900/20 p-4 rounded border border-red-900/50">
-                              <h4 className="font-bold text-red-400 mb-1 flex items-center gap-2"><Gamepad2 size={16}/> 猎人</h4>
-                              <p className="text-sm">在<strong>白天</strong>辨认并射杀伪装的恶魔。</p>
-                              <p className="text-sm mt-2">如果在夜晚存活到黎明（180秒+40秒），猎人获胜。</p>
-                          </div>
-                          <div className="bg-purple-900/20 p-4 rounded border border-purple-900/50">
-                              <h4 className="font-bold text-purple-400 mb-1 flex items-center gap-2"><Skull size={16}/> 恶魔</h4>
-                              <p className="text-sm">在<strong>夜晚</strong>现出真身并击杀猎人。</p>
-                              <p className="text-sm mt-2">吞噬蘑菇可以加速夜晚降临。</p>
-                          </div>
-                      </div>
-                  </section>
-                  <section>
-                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">2. 昼夜机制</h3>
-                      <ul className="list-disc list-inside space-y-2 text-sm">
-                          <li><span className="text-yellow-400 font-bold">白天 (180秒)</span>: 猎人视野开阔。恶魔伪装成无害的鹿。猎人开枪会受到“时间惩罚”，加速入夜。</li>
-                          <li><span className="text-red-500 font-bold">夜晚 (40秒)</span>: 恶魔现出原形，视野变小但速度极快。猎人无法在夜晚彻底杀死恶魔，只能将其<strong>击晕0.5秒</strong>。</li>
-                      </ul>
-                  </section>
-                  <section>
-                      <h3 className="text-xl font-bold text-white mb-2 border-b border-stone-700 pb-1">3. 关键道具 & 技能</h3>
-                      <ul className="list-disc list-inside space-y-2 text-sm">
-                          <li><strong>木屋</strong>: 地图中央的安全区。猎人在门前停留5秒可进入，进入后夜晚无敌。</li>
-                          <li><strong>蘑菇</strong>: 散落在地图各处。恶魔吃掉蘑菇会显著加速时间流逝（加速入夜）。</li>
-                          <li><span className="text-purple-400 font-bold">恶魔追踪</span>: 夜晚时，恶魔可以使用一次交互键来感知猎人的方位（显示红色箭头）。</li>
-                      </ul>
-                  </section>
-              </div>
-          </div>
-      </div>
-  );
-
-  const renderMenu = () => (
-    <div className="flex flex-col gap-4 items-center">
-      <h1 className="text-4xl md:text-5xl font-bold text-green-400 mb-8 tracking-tighter text-center">FOREST WHISPERS</h1>
-      <button 
-        onClick={() => {
-            setGameMode(GameMode.SINGLE_PLAYER);
-            setMyRole(EntityType.HUNTER);
-            setOpponentMode('WAITING');
-            setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
-        }}
-        className="w-64 py-4 bg-stone-100 text-stone-900 font-bold rounded hover:scale-105 transition flex items-center justify-center gap-2"
-      >
-        <Monitor size={20}/> 本地游戏 / 单人
-      </button>
-      <button 
-        onClick={() => {
-            setGameMode(GameMode.ONLINE_HOST); 
-            setOpponentMode('WAITING');
-            setLatency(null);
-            initializeHost();
-            setMyRole(EntityType.HUNTER);
-            setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
-        }}
-        className="w-64 py-4 bg-stone-800 text-stone-200 border border-stone-600 font-bold rounded hover:scale-105 transition flex items-center justify-center gap-2"
-      >
-        <Users size={20}/> 创建在线房间
-      </button>
-      <button 
-        onClick={() => {
-            setJoinError("");
-            setShowJoinPanel(true);
-        }}
-        className="w-64 py-4 bg-stone-800 text-stone-200 border border-stone-600 font-bold rounded hover:scale-105 transition flex items-center justify-center gap-2"
-      >
-        <Link size={20}/> 加入在线房间
-      </button>
-    </div>
-  );
-
-  const renderLobby = () => {
-    const isGuest = gameMode === GameMode.ONLINE_CLIENT;
-    const isOnline = gameMode === GameMode.ONLINE_HOST || gameMode === GameMode.ONLINE_CLIENT;
-
-    const renderCard = (role: EntityType) => {
-        const isMyRole = myRole === role;
-        let statusText = "空缺";
-        let statusColor = "text-stone-500";
-        if (isMyRole) {
-            statusText = "你 (Player 1)";
-            statusColor = "text-green-400";
-        } else {
-            if (opponentMode === 'WAITING') {
-                statusText = gameMode === GameMode.SINGLE_PLAYER ? "点击添加电脑" : "等待加入...";
-                statusColor = "text-yellow-500";
-            } else if (opponentMode === 'COMPUTER') {
-                statusText = "电脑 (AI)";
-                statusColor = "text-purple-400";
-            } else if (opponentMode === 'CONNECTED') {
-                statusText = "玩家 2 (已连接)";
-                statusColor = "text-blue-400";
-            }
-        }
-        const canAddCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode !== 'COMPUTER';
-        const canRemoveCpu = !isMyRole && gameMode === GameMode.SINGLE_PLAYER && opponentMode === 'COMPUTER';
-        const canSwitchRole = (gameMode === GameMode.SINGLE_PLAYER || gameMode === GameMode.ONLINE_HOST) && !isMyRole;
-
-        return (
-            <div 
-                className={`relative flex flex-col items-center justify-center p-4 w-40 h-56 md:w-48 md:h-64 border-2 rounded-xl transition-all
-                    ${isMyRole ? 'border-green-500 bg-green-900/20' : 'border-stone-700 bg-stone-800/50'}
-                    ${canSwitchRole ? 'cursor-pointer hover:border-stone-500 hover:scale-105' : ''}
-                `}
-                onClick={() => {
-                   if (canSwitchRole) {
-                       setMyRole(role);
-                       if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
-                   }
-                }}
-            >
-                <div className={`mb-4 p-4 rounded-full ${role === EntityType.HUNTER ? 'bg-red-500/20 text-red-500' : 'bg-purple-500/20 text-purple-500'}`}>
-                    {role === EntityType.HUNTER ? <Gamepad2 size={48}/> : <Skull size={48}/>}
-                </div>
-                <h3 className="text-lg md:text-xl font-bold uppercase mb-2">{role === EntityType.HUNTER ? '猎人' : '恶魔'}</h3>
-                <span className={`text-xs md:text-sm font-bold ${statusColor}`}>{statusText}</span>
-                {canAddCpu && (
-                    <button 
-                        className="mt-4 px-3 py-1 bg-stone-700 hover:bg-stone-600 rounded text-xs flex items-center gap-1 z-10"
-                        onClick={(e) => { e.stopPropagation(); setOpponentMode('COMPUTER'); }}
-                    >
-                        <UserPlus size={14}/> <span className="hidden md:inline">电脑</span>
-                    </button>
-                )}
-                {canRemoveCpu && (
-                    <button 
-                        className="mt-4 px-3 py-1 bg-red-900/50 hover:bg-red-900 text-red-200 rounded text-xs flex items-center gap-1 z-10"
-                        onClick={(e) => { e.stopPropagation(); setOpponentMode('WAITING'); }}
-                    >
-                        <User size={14}/> <span className="hidden md:inline">移除</span>
-                    </button>
-                )}
-            </div>
-        );
-    };
-
-    return (
-        <div className="bg-neutral-800 p-4 md:p-8 rounded-lg border border-neutral-700 w-full max-w-4xl flex flex-col items-center relative my-auto">
-            <h2 className="text-2xl md:text-3xl font-bold text-stone-200 mb-6 flex items-center gap-3">
-                <Users /> 选择角色 {isOnline && <span className="text-xs text-blue-400 bg-blue-900/30 px-2 py-1 rounded border border-blue-500/30">在线模式</span>}
-            </h2>
-            <button 
-                onClick={() => setShowRules(true)}
-                className="absolute top-4 right-4 md:top-8 md:right-8 text-stone-400 hover:text-green-400 flex items-center gap-2 transition"
-            >
-                <BookOpen size={20} /> <span className="hidden sm:inline">规则</span>
-            </button>
-            {gameMode === GameMode.ONLINE_HOST && (
-                <div className="mb-6 px-4 py-2 bg-neutral-900 rounded border border-neutral-600 flex items-center gap-4">
-                    <span className="text-stone-400 text-xs md:text-sm">房间号</span>
-                    <span className="text-xl md:text-2xl text-green-400 font-mono font-bold tracking-widest">{roomId}</span>
-                    <button onClick={handleCopy} className="p-2 hover:bg-white/10 rounded transition">
-                        {isCopied ? <Check size={18} className="text-green-500"/> : <Copy size={18} className="text-stone-400"/>}
-                    </button>
-                </div>
-            )}
-            {opponentMode === 'CONNECTED' && latency !== null && (
-                <div className="absolute top-4 left-4 md:top-8 md:left-8 flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10">
-                    <Signal size={16} className={latency < 100 ? "text-green-500" : latency < 200 ? "text-yellow-500" : "text-red-500"} />
-                    <div className="flex flex-col">
-                        <span className="text-stone-400 text-[10px] font-bold leading-none uppercase">Ping</span>
-                        <span className="text-stone-200 text-xs font-mono leading-none">{latency}ms</span>
-                    </div>
-                </div>
-            )}
-            <div className="flex flex-row gap-4 md:gap-8 mb-8">
-                {renderCard(EntityType.HUNTER)}
-                <div className="hidden md:flex items-center text-stone-600 font-bold text-xl">VS</div>
-                {renderCard(EntityType.DEMON)}
-            </div>
-            <div className="flex gap-4 w-full max-w-md">
-                <button 
-                    onClick={() => {
-                        if (peerRef.current) peerRef.current.destroy();
-                        if (connRef.current) connRef.current.close();
-                        setGameMode(GameMode.SINGLE_PLAYER);
-                        setOpponentMode('WAITING');
-                        setGameState(prev => ({...prev, phase: GamePhase.MENU}));
-                    }}
-                    className="flex-1 py-3 border border-stone-600 text-stone-400 rounded hover:bg-stone-700 transition"
-                >
-                    返回
-                </button>
-                {gameMode === GameMode.SINGLE_PLAYER ? (
-                    <button 
-                        onClick={startGame}
-                        className="flex-1 py-3 font-bold rounded flex items-center justify-center gap-2 transition bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20"
-                    >
-                        <Play size={18} /> 开始游戏
-                    </button>
-                ) : (
-                    <button 
-                        onClick={startGame}
-                        disabled={isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED')}
-                        className={`flex-1 py-3 font-bold rounded flex items-center justify-center gap-2 transition
-                            ${(isGuest || (gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED'))
-                                ? 'bg-stone-700 text-stone-500 cursor-not-allowed' 
-                                : 'bg-green-600 text-white hover:bg-green-500 shadow-lg hover:shadow-green-500/20'}`}
-                    >
-                        {isGuest 
-                            ? <div className="flex flex-col items-center leading-none">
-                                <span className="flex items-center gap-2"><Info size={18} /> 等待房主开始</span>
-                                {latency !== null && <span className="text-[10px] opacity-70 mt-1 font-mono">延迟: {latency}ms</span>}
-                              </div>
-                            : (opponentMode === 'CONNECTED' ? <><Play size={18} /> 开始游戏</> : <><Users size={18} /> 等待玩家加入...</>)
-                        }
-                    </button>
-                )}
-            </div>
-            {gameMode === GameMode.ONLINE_HOST && opponentMode !== 'CONNECTED' && (
-                <p className="text-sm text-yellow-500 mt-4 flex items-center gap-2 animate-pulse">
-                    <Info size={16}/> 等待玩家加入以开始游戏...
-                </p>
-            )}
-        </div>
-    );
-  };
-
   const cameraTarget = myRole === EntityType.HUNTER ? 'HUNTER' : 'DEMON';
 
   return (
     <div className={`h-[100dvh] w-full bg-neutral-900 text-stone-200 flex flex-col items-center font-mono overflow-hidden relative`}>
-      {showRules && renderRules()}
-      {showJoinPanel && renderJoinPanel()}
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+      {showJoinPanel && <JoinModal onClose={() => setShowJoinPanel(false)} onJoin={joinGame} isConnecting={isConnecting} error={joinError} />}
       
       {isMobile && gameState.phase === GamePhase.PLAYING && (
          <MobileControls 
@@ -928,45 +685,26 @@ const App: React.FC = () => {
          />
       )}
 
-      {/* DIAGNOSTIC OVERLAY for ONLINE CLIENT */}
+      {/* DIAGNOSTIC OVERLAY */}
       {gameMode === GameMode.ONLINE_CLIENT && gameState.phase === GamePhase.PLAYING && (
           <div className="absolute top-16 right-4 z-50 bg-black/60 p-2 rounded text-[10px] font-mono border border-stone-600 flex flex-col gap-1 w-32 backdrop-blur-sm pointer-events-none select-none">
              <div className="flex justify-between border-b border-stone-600 pb-1 mb-1">
                  <span className="font-bold text-blue-400">DEBUG</span>
                  <span>{roomId}</span>
              </div>
-             <div className="flex justify-between">
-                 <span>Packets:</span>
-                 <span className="text-green-400">{packetCountRef.current}</span>
-             </div>
-             <div className="flex justify-between">
-                 <span>Latency:</span>
-                 <span className={latency && latency > 200 ? "text-red-500" : "text-stone-300"}>{latency ?? '-'}ms</span>
-             </div>
-             <div className="flex justify-between">
-                 <span>Trees:</span>
-                 <span className={(gameState.trees?.length || 0) === 0 ? "text-red-500 font-bold" : "text-stone-300"}>{gameState.trees?.length || 0}</span>
-             </div>
-             <div className="flex justify-between">
-                 <span>Ents:</span>
-                 <span className="text-stone-300">{(gameState.deers?.length || 0) + (gameState.mushrooms?.length || 0) + (gameState.cabin ? 1 : 0)}</span>
-             </div>
-             {lastError && (
-                 <div className="mt-1 pt-1 border-t border-red-900 text-red-400 break-words leading-tight">
-                     ! {lastError.substring(0, 30)}
-                 </div>
-             )}
+             <div className="flex justify-between"><span>Pkt:</span><span className="text-green-400">{packetCountRef.current}</span></div>
+             <div className="flex justify-between"><span>Lat:</span><span className={latency && latency > 200 ? "text-red-500" : "text-stone-300"}>{latency ?? '-'}ms</span></div>
+             {lastError && <div className="mt-1 pt-1 border-t border-red-900 text-red-400 break-words leading-tight">! {lastError.substring(0, 30)}</div>}
           </div>
       )}
 
-      {/* Exit Button - Desktop Only */}
+      {/* Exit Button */}
       {gameState.phase === GamePhase.PLAYING && gameMode === GameMode.SINGLE_PLAYER && !isMobile && (
         <button 
             onClick={() => setGameState(prev => ({ ...prev, phase: GamePhase.LOBBY }))}
             className="fixed top-4 left-4 z-50 bg-neutral-800/80 hover:bg-red-900/90 text-stone-400 hover:text-white border border-neutral-600 hover:border-red-500 rounded-lg px-3 py-2 flex items-center gap-2 transition-all shadow-xl backdrop-blur-sm font-bold text-sm"
         >
-            <LogOut size={16} />
-            <span className="hidden md:inline">退出</span>
+            <LogOut size={16} /> <span className="hidden md:inline">退出</span>
         </button>
       )}
 
@@ -988,76 +726,62 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* COMPACT HUD Header */}
+      {/* Game HUD */}
       {gameState.phase === GamePhase.PLAYING && (
-          <div className="absolute top-2 left-1/2 -translate-x-1/2 w-full max-w-4xl flex flex-row justify-between items-center px-4 py-1 z-20 pointer-events-none">
-             <div className="flex flex-row justify-between items-center w-full bg-neutral-900/60 backdrop-blur-md rounded-xl p-1 border border-white/5 shadow-2xl">
-                <div className={`flex items-center gap-2 p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'HUNTER' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-                    <div className="flex flex-col">
-                        <span className="text-[10px] text-stone-400 leading-tight">猎人</span>
-                        <div className="flex items-center gap-1 text-red-400 font-bold text-xs md:text-sm">
-                        <Gamepad2 size={14} className="md:w-5 md:h-5" />
-                        <span>∞</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="flex flex-col items-center flex-1 mx-2 md:mx-4">
-                    <span className="text-[10px] md:text-xs text-stone-400 mb-0.5 leading-none font-bold text-shadow">
-                        {gameState.isNight ? "存活" : "入夜"}
-                    </span>
-                    <div className="w-full md:w-64 h-2 md:h-3 bg-neutral-700/50 rounded-full overflow-hidden border border-white/10 relative">
-                        <div 
-                        className={`h-full transition-colors duration-300 ${gameState.isNight ? 'bg-red-600' : 'bg-yellow-500'}`}
-                        style={{ width: `${gameState.isNight ? Math.max(0, ((NIGHT_DURATION_SECONDS - gameState.nightTimer) / NIGHT_DURATION_SECONDS) * 100) : Math.max(0, (1 - gameState.timeOfDay) * 100)}%` }}
-                        />
-                    </div>
-                    <span className="text-[10px] md:text-xs text-stone-300 mt-0.5 font-mono leading-none">
-                        {gameState.isNight 
-                            ? `${Math.ceil(NIGHT_DURATION_SECONDS - gameState.nightTimer)}s`
-                            : `${Math.ceil((1 - gameState.timeOfDay) * DAY_DURATION_SECONDS)}s`
-                        }
-                    </span>
-                </div>
-
-                <div className={`flex items-center gap-2 text-right p-1 px-3 rounded-lg transition-colors ${cameraTarget === 'DEMON' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}>
-                    <div className="flex flex-col items-end">
-                        <span className="text-[10px] text-stone-400 leading-tight">恶魔</span>
-                        <div className="flex items-center gap-1 text-purple-400 font-bold text-xs md:text-sm">
-                        <span>{gameState.isNight ? "猎杀" : "伪装"}</span>
-                        <Skull size={14} className="md:w-5 md:h-5" />
-                        </div>
-                    </div>
-                </div>
-             </div>
-            
-            {gameState.hunter.enterTimer > 0 && !gameState.hunter.inCabin && (
-                <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-neutral-900/90 px-3 py-1 rounded border border-yellow-500 text-yellow-500 flex flex-col items-center gap-1 z-50 shadow-xl backdrop-blur">
-                    <span className="text-[10px] flex items-center gap-1 font-bold animate-pulse whitespace-nowrap">
-                        <LockKeyhole size={10}/> 开锁中... {Math.floor((gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%
-                    </span>
-                    <div className="w-24 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-                        <div 
-                           className="h-full bg-yellow-500"
-                           style={{ width: `${Math.min(100, (gameState.hunter.enterTimer / CABIN_ENTER_DURATION) * 100)}%` }}
-                        />
-                    </div>
-                </div>
-            )}
-             {gameState.hunter.inCabin && (
-                <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-green-900/90 px-3 py-1 rounded border border-green-500 text-green-300 flex items-center gap-2 z-50 shadow-xl">
-                    <Check size={12}/>
-                    <span className="text-[10px] font-bold whitespace-nowrap">已躲入屋内</span>
-                </div>
-            )}
-          </div>
+          <GameHUD gameState={gameState} cameraTarget={cameraTarget} />
       )}
 
+      {/* Main Content Area */}
       <div className={`w-full h-full flex items-center justify-center overflow-y-auto ${gameState.phase !== GamePhase.PLAYING ? 'py-8' : ''}`}>
         {(gameState.phase === GamePhase.MENU || gameState.phase === GamePhase.LOBBY) && (
             <div className="w-full max-w-4xl mx-auto flex flex-col items-center justify-center min-h-full">
-                {gameState.phase === GamePhase.MENU && renderMenu()}
-                {gameState.phase === GamePhase.LOBBY && renderLobby()}
+                {gameState.phase === GamePhase.MENU && (
+                    <MainMenu 
+                        onSinglePlayer={() => {
+                            setGameMode(GameMode.SINGLE_PLAYER);
+                            setMyRole(EntityType.HUNTER);
+                            setOpponentMode('WAITING');
+                            setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
+                        }}
+                        onHostGame={() => {
+                            setGameMode(GameMode.ONLINE_HOST); 
+                            setOpponentMode('WAITING');
+                            setLatency(null);
+                            initializeHost();
+                            setMyRole(EntityType.HUNTER);
+                            setGameState(prev => ({...prev, phase: GamePhase.LOBBY}));
+                        }}
+                        onJoinGame={() => {
+                            setJoinError("");
+                            setShowJoinPanel(true);
+                        }}
+                    />
+                )}
+                {gameState.phase === GamePhase.LOBBY && (
+                    <Lobby 
+                        gameMode={gameMode}
+                        roomId={roomId}
+                        myRole={myRole}
+                        opponentMode={opponentMode}
+                        latency={latency}
+                        isCopied={isCopied}
+                        onCopy={handleCopy}
+                        onShowRules={() => setShowRules(true)}
+                        onBack={() => {
+                            if (peerRef.current) peerRef.current.destroy();
+                            if (connRef.current) connRef.current.close();
+                            setGameMode(GameMode.SINGLE_PLAYER);
+                            setOpponentMode('WAITING');
+                            setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+                        }}
+                        onStart={startGame}
+                        onSetRole={(role) => {
+                            setMyRole(role);
+                            if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
+                        }}
+                        onSetOpponentMode={setOpponentMode}
+                    />
+                )}
             </div>
         )}
         
@@ -1069,24 +793,16 @@ const App: React.FC = () => {
                     <GameCanvas gameState={gameState} cameraTarget={cameraTarget} />
                     
                     {gameState.phase !== GamePhase.PLAYING && (
-                    <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center rounded-lg z-30 backdrop-blur-sm px-8 text-center border-2 border-stone-800">
-                        <h1 className="text-2xl md:text-5xl font-bold text-stone-100 mb-2 tracking-widest uppercase text-shadow">游戏结束</h1>
-                        <p className="text-md md:text-xl text-stone-300 mb-8 max-w-lg">
-                        {gameState.phase === GamePhase.GAME_OVER_HUNTER_WINS && <span className="text-green-400">猎人净化了森林中的邪恶！</span>}
-                        {gameState.phase === GamePhase.GAME_OVER_DEMON_WINS && <span className="text-red-500">森林吞噬了又一个灵魂...</span>}
-                        </p>
-                        <button 
-                        onClick={() => setGameState(prev => ({...prev, phase: GamePhase.LOBBY}))}
-                        className="flex items-center gap-2 px-8 py-3 bg-stone-100 text-neutral-900 font-bold rounded hover:bg-white hover:scale-105 transition-all mb-8 pointer-events-auto"
-                        >
-                        <RefreshCw size={20} /> 返回大厅
-                        </button>
-                    </div>
+                        <GameOverModal 
+                            phase={gameState.phase} 
+                            onRestart={() => setGameState(prev => ({...prev, phase: GamePhase.LOBBY}))} 
+                        />
                     )}
                 </div>
             </div>
         )}
 
+        {/* Event Logs */}
         {gameState.phase === GamePhase.PLAYING && (
             <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center z-20 px-4 w-full pointer-events-none gap-1">
                 {gameState.messages.slice(0, 3).map((msg) => (
