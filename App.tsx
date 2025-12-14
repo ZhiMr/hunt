@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 import GameCanvas from './components/GameCanvas';
 import { MobileControls } from './components/MobileControls';
@@ -134,7 +133,7 @@ const createInitialState = (): GameState => {
   }
 
   const deers: Entity[] = [];
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 25; i++) {
     let pos = { x: 0, y: 0 };
     let valid = false;
     let spawnAttempts = 0;
@@ -668,8 +667,8 @@ const App: React.FC = () => {
           if (myRole === EntityType.HUNTER) demonIn = remoteInputRef.current; else hunterIn = remoteInputRef.current;
       } else if (opponentMode === 'COMPUTER') {
              const obstacles = [...prev.trees, prev.cabin];
-             if (myRole === EntityType.HUNTER) demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, obstacles, prev.isNight, safeDelta);
-             else hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, obstacles, prev.isNight, safeDelta);
+             if (myRole === EntityType.HUNTER) demonIn = calculateBotInput(prev.demon, prev.hunter, prev.mushrooms, prev.deers, obstacles, prev.bushes, prev.isNight, safeDelta);
+             else hunterIn = calculateBotInput(prev.hunter, prev.demon, prev.mushrooms, prev.deers, obstacles, prev.bushes, prev.isNight, safeDelta);
       }
 
       let nextState;

@@ -1,6 +1,6 @@
 {
   "name": "forest-whispers-hunt",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Forest Whispers: Hunt - Asymmetrical PvP Game",
   "type": "module",
   "main": "dist/index.js",

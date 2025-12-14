@@ -1,20 +1,30 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Forest Whispers: Hunt (森林低语)
 
-# Run and deploy your AI Studio app
+v1.0.1
 
-This contains everything you need to run your app locally.
+一款 2D 像素风格的非对称对抗游戏 (Asymmetrical PvP)。
 
-View your app in AI Studio: https://ai.studio/apps/drive/1gPhK7xjwFrKfvAorkWidKmSucU24Ekzr
+## 游戏背景
+在幽暗的森林中，一名**猎人**正在搜寻伪装成鹿的**恶魔**。
+- **白天 (180秒)**: 猎人视野开阔，恶魔必须伪装求生。
+- **夜晚 (40秒)**: 恶魔现出真身，猎人视野受限，猎守关系逆转。
 
-## Run Locally
+## 操作说明 (PC)
+- **移动**: WASD 或 方向键
+- **交互/攻击**: 空格键 (Space) 或 回车键 (Enter)
 
-**Prerequisites:**  Node.js
+## 玩法规则
+### 猎人 (Hunter)
+- **目标**: 射杀伪装的恶魔，或在夜晚存活至黎明。
+- **机制**: 开枪会受到时间惩罚（加速入夜）。夜晚可以躲入地图中央的木屋避难。
 
+### 恶魔 (Demon)
+- **目标**: 在夜晚击杀猎人。
+- **机制**: 
+  - 白天伪装成鹿，吃蘑菇可加速入夜。
+  - 夜晚现出真身，可以使用技能感知猎人位置。
+  - 被猎人击中会死亡（白天）或眩晕（夜晚）。
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## 开发
+- 构建: `npm run build`
+- 预览: `npm run preview`

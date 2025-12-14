@@ -30,6 +30,15 @@ export interface HunterAIState {
   mode: 'IDLE' | 'PATROL' | 'CHASE' | 'RETURN_CABIN';
   targetPos: Vector2 | null;
   waitTimer: number;
+  stuckTimer: number;      // New: Tracks how long hunter has been stationary while trying to move
+  lastPos: Vector2 | null; // New: Tracks last position to calculate movement delta
+}
+
+export interface DemonAIState {
+  mode: 'PATROL' | 'CHASE' | 'INVESTIGATE';
+  targetPos: Vector2 | null;
+  timer: number;
+  lastPatrolPoint: Vector2 | null; // Used to pick next point far away from previous
 }
 
 export interface Entity {
@@ -39,7 +48,7 @@ export interface Entity {
   size: number; // Radius or half-width
   angle: number; // Rotation in radians
   // Optional AI state
-  aiState?: DeerAIState | HunterAIState;
+  aiState?: DeerAIState | HunterAIState | DemonAIState;
 }
 
 export interface Player extends Entity {
@@ -60,6 +69,7 @@ export interface Demon extends Player {
   stunTimer: number; // Time remaining stunned (in seconds)
   trackingActiveTime: number; // How long the tracking arrow is visible
   canTrack: boolean; // Whether the one-time night tracking is available
+  aiState?: DemonAIState;
 }
 
 export interface GameMessage {
