@@ -322,14 +322,14 @@ export const calculateBotInput = (
                  if (ai.targetPos) {
                      // Was moving, now stop
                      ai.targetPos = null;
-                     ai.timer = 60 + Math.random() * 240; // Stop for 1-4s
+                     ai.timer = 60 + Math.random() * 240; // 1-5s Idle (Matches Deer)
                  } else {
                      // Was stopped, now move
-                     // Pick random angle
-                     const angle = Math.random() * Math.PI * 2;
+                     // Pick random 8-way angle for Demon Disguise
+                     const angle = Math.floor(Math.random() * 8) * (Math.PI / 4);
                      // Set a target pos far away in that direction to simulate movement vector
                      ai.targetPos = { x: myPos.x + Math.cos(angle) * 1000, y: myPos.y + Math.sin(angle) * 1000 };
-                     ai.timer = 60 + Math.random() * 120; // Move for 1-2s
+                     ai.timer = 60 + Math.random() * 540; // 1-10s Moving (Matches Deer)
                  }
             }
             
@@ -353,11 +353,12 @@ export const calculateBotInput = (
                  // Wander if no mushrooms
                  ai.timer -= dt * FPS;
                  if (ai.timer <= 0) {
-                     if (ai.targetPos) { ai.targetPos = null; ai.timer = 60 + Math.random() * 120; }
+                     if (ai.targetPos) { ai.targetPos = null; ai.timer = 60 + Math.random() * 240; } // Idle 1-5s
                      else {
-                         const angle = Math.random() * Math.PI * 2;
+                         // Pick random 8-way angle for Demon Disguise
+                         const angle = Math.floor(Math.random() * 8) * (Math.PI / 4);
                          ai.targetPos = { x: myPos.x + Math.cos(angle) * 1000, y: myPos.y + Math.sin(angle) * 1000 };
-                         ai.timer = 60 + Math.random() * 120;
+                         ai.timer = 60 + Math.random() * 540; // Move 1-10s
                      }
                  }
                  if (ai.targetPos) moveDir = normalize(sub(ai.targetPos, myPos));
@@ -862,14 +863,23 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       d.aiState.timer -= dt * FPS;
       if (d.aiState.timer <= 0) {
           d.aiState.moving = !d.aiState.moving;
-          d.aiState.timer = 60 + Math.random() * 120;
+          // State Switch
           if (d.aiState.moving) {
-              // CHANGE: Snap to 8 directions (0, 45, 90, 135...)
+              // Start Moving: 1s to 10s
+              d.aiState.timer = 60 + Math.random() * 540; 
               d.angle = Math.floor(Math.random() * 8) * (Math.PI / 4);
+          } else {
+              // Start Idling: 1s to 5s
+              d.aiState.timer = 60 + Math.random() * 240;
           }
       }
 
       if (d.aiState.moving) {
+          // Randomly change direction while moving (0.3% chance per frame)
+          if (Math.random() < 0.003) {
+               d.angle = Math.floor(Math.random() * 8) * (Math.PI / 4);
+          }
+
           const moveDist = MOVE_SPEED_DEER * dt * FPS;
           const dir = { x: Math.cos(d.angle), y: Math.sin(d.angle) };
           const nextPos = add(d.pos, scale(dir, moveDist));
@@ -877,7 +887,9 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
           if (!checkCollision(nextPos, d.size, obstacles)) {
               d.pos = nextPos;
           } else {
-              d.angle += Math.PI; // Bounce
+              // Collision Behavior: Stop moving, wait 0.3s - 1.0s, then pick new direction (handled by logic above when timer expires)
+              d.aiState.moving = false; 
+              d.aiState.timer = 18 + Math.random() * 42; 
           }
       }
       return d;

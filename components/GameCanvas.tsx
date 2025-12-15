@@ -1,4 +1,3 @@
-
 import React, { useRef, useEffect } from 'react';
 import { GameState, Entity, EntityType, Vector2 } from '../types';
 import { COLORS, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT, VISION_RADIUS_BUSH, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, MAP_SIZE, TREE_COLLISION_RATIO, RENDER_SCALE } from '../constants';
@@ -142,12 +141,47 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
       ctx.rotate(entity.angle);
       
       if (entity.type === EntityType.HUNTER) {
+         // --- Realistic Hunter ---
+         
+         // 1. Arms REMOVED (No ellipse calls here)
+         
+         // 2. Gun
+         // Stock
+         ctx.fillStyle = '#451a03'; // Dark Wood
+         ctx.fillRect(-4, -1, 10, 4); 
+         // Body/Mechanism
+         ctx.fillStyle = '#262626'; // Metal
+         ctx.fillRect(6, -1.5, 6, 5);
+         // Barrel
+         ctx.fillStyle = '#171717'; // Dark Metal
+         ctx.fillRect(12, 0, 16, 2);
+
+         // 3. Hands
+         ctx.fillStyle = '#ffedd5'; // Skin tone
          ctx.beginPath();
-         ctx.arc(0, 0, entity.size, 0, Math.PI * 2);
+         ctx.arc(7, 2, 2.5, 0, Math.PI * 2); // Right hand (Trigger)
+         ctx.arc(14, 0, 2.5, 0, Math.PI * 2); // Left hand (Barrel)
          ctx.fill();
-         // Gun
-         ctx.fillStyle = '#000';
-         ctx.fillRect(0, -2, entity.size + 10, 4);
+
+         // 4. Shoulders/Body (Jacket)
+         ctx.fillStyle = '#92400e'; // Amber-800
+         ctx.beginPath();
+         // Oval body, slightly offset back
+         ctx.ellipse(-4, 0, 7, 10, 0, 0, Math.PI * 2);
+         ctx.fill();
+
+         // 5. Head/Hat
+         // Brim (Wide circle)
+         ctx.fillStyle = '#3f3f46'; // Zinc-700
+         ctx.beginPath();
+         ctx.arc(-2, 0, 9, 0, Math.PI * 2);
+         ctx.fill();
+         // Crown (Darker center)
+         ctx.fillStyle = '#18181b'; // Zinc-900
+         ctx.beginPath();
+         ctx.arc(-2, 0, 5, 0, Math.PI * 2);
+         ctx.fill();
+
       } else if (entity.type === EntityType.DEER || (entity.type === EntityType.DEMON && !isDemon)) {
          // Deer Shape
          ctx.fillStyle = color;
@@ -343,7 +377,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     let insideBushId: string | null = null;
     const bushList = gameState.bushes || [];
     for (const bush of bushList) {
-        if (distance(visionSource.pos, bush.pos) < bush.size) {
+        // INCREASED RANGE: Trigger when bodies overlap (Player Size + Bush Size) + 5px Buffer
+        // This ensures the logic for "being inside" matches the visual transparency roughly
+        if (distance(visionSource.pos, bush.pos) < (bush.size + visionSource.size + 5)) {
             insideBushId = bush.id;
             visionRadius = VISION_RADIUS_BUSH; // Reduced vision inside bush
             break;
@@ -367,7 +403,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     );
 
     // INCREASED RAY COUNT for high fidelity
-    const NUM_RAYS = 720; 
+    const NUM_RAYS = 2160; 
     
     // Initialize smoothing buffer if needed
     if (!prevDistancesRef.current || prevDistancesRef.current.length !== NUM_RAYS + 1) {
@@ -375,7 +411,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
     }
     
     const currentDistances = prevDistancesRef.current;
-    const LERP_FACTOR = 0.3; // Lower = smoother but more lag, Higher = snappier but more jitter
+    const LERP_FACTOR = 0.5; // Slightly snappier for high ray count
 
     // Calculate Target Distances for this frame
     const targetDistances = new Float32Array(NUM_RAYS + 1);
@@ -392,7 +428,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
          
          if (obs.type === EntityType.TREE) {
             // Treat Tree Trunks as Circles for smooth shadows
-            const radius = obs.size * TREE_COLLISION_RATIO;
+            // INCREASED SHADOW RADIUS: Use 0.45 instead of 0.35 to make shadows thicker/more solid
+            const radius = obs.size * 0.45;
             dist = intersectRayCircle(visionSource.pos, dir, obs.pos, radius);
          } else if (obs.type === EntityType.CABIN) {
             // Cabin is a box
@@ -468,7 +505,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, cameraTarget }) => {
 
     // Draw Bushes (Top Layer - Covers entities)
     bushObjects.forEach(obj => {
-        const isMeInside = distance(targetEntity.pos, obj.pos) < obj.size;
+        // INCREASED RANGE: Trigger transparency when bodies overlap (Player Size + Bush Size) + 5px Buffer
+        const isMeInside = distance(targetEntity.pos, obj.pos) < (obj.size + targetEntity.size + 5);
         
         // If inside, use offscreen buffer to create a uniform transparent layer
         if (isMeInside && bushBufferRef.current && bufferCtx) {

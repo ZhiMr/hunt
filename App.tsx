@@ -404,9 +404,27 @@ const App: React.FC = () => {
     peer.on('error', (err) => {
         console.error("Host Error:", err);
         setLastError(`HostErr: ${err.type}`);
+        
+        // Critical errors that require reset
+        if (['invalid-id', 'unavailable-id', 'browser-incompatible', 'ssl-unavailable'].includes(err.type)) {
+             setJoinError("创建失败");
+             window.alert(`错误: ${err.type}`);
+             setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+             return;
+        }
+
+        // Non-critical network issues (e.g. signaling server disconnect)
+        // If we have a connected peer, we likely don't want to kill the game
+        if ((err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'disconnected' || err.message?.includes('Lost connection')) && connRef.current?.open) {
+            console.warn("Signaling server lost, but P2P might be active.");
+            return;
+        }
+
         setJoinError("创建失败");
-        window.alert(`错误: ${err.type}`);
-        setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+        // Only kick if we aren't already connected to a peer
+        if (!connRef.current?.open) {
+            setGameState(prev => ({...prev, phase: GamePhase.MENU}));
+        }
     });
 
     peer.on('connection', (conn) => {
@@ -450,6 +468,12 @@ const App: React.FC = () => {
         console.error("Client Error:", err);
         setLastError(`ClientErr: ${err.type}`);
         setIsConnecting(false);
+        
+        // Ignore signaling errors if P2P is active
+        if ((err.type === 'network' || err.type === 'server-error' || err.type === 'disconnected' || err.message?.includes('Lost connection')) && connRef.current?.open) {
+            return;
+        }
+
         if (err.type === 'peer-unavailable') setJoinError("房间不存在");
         else setJoinError(`连接错误: ${err.type}`);
     });
@@ -841,7 +865,7 @@ const App: React.FC = () => {
                         onStart={startGame}
                         onSetRole={(role) => {
                             setMyRole(role);
-                            if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
+                            if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' : 'WAITING');
                         }}
                         onSetOpponentMode={setOpponentMode}
                     />
