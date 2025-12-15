@@ -1,3 +1,4 @@
+
 import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter, Demon, DemonAIState } from '../types';
 import { 
   MAP_SIZE, MOVE_SPEED_HUNTER, MOVE_SPEED_DEMON, MOVE_SPEED_DEER, 
@@ -695,7 +696,7 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
                   type: EntityType.DEER,
                   pos,
                   size: 12,
-                  angle: Math.random() * Math.PI * 2,
+                  angle: Math.floor(Math.random() * 8) * (Math.PI / 4), // 8-way rotation
                   aiState: { moving: Math.random() > 0.5, timer: 60 }
                 });
              }
@@ -862,7 +863,10 @@ export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInpu
       if (d.aiState.timer <= 0) {
           d.aiState.moving = !d.aiState.moving;
           d.aiState.timer = 60 + Math.random() * 120;
-          if (d.aiState.moving) d.angle = Math.random() * Math.PI * 2;
+          if (d.aiState.moving) {
+              // CHANGE: Snap to 8 directions (0, 45, 90, 135...)
+              d.angle = Math.floor(Math.random() * 8) * (Math.PI / 4);
+          }
       }
 
       if (d.aiState.moving) {
