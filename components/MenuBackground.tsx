@@ -41,7 +41,7 @@ export const MenuBackground: React.FC = () => {
     const trees: { x: number; y: number; size: number }[] = [];
 
     // Spawn Sheep
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 30; i++) {
       sheep.push({
         x: Math.random() * width,
         y: Math.random() * height,

@@ -43,8 +43,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onSinglePlayer, onHostGame, 
         </button>
       </div>
       
-      <div className="absolute bottom-4 text-xs text-stone-400 z-10 opacity-60">
-        v1.0.0 • 猎人 vs 恶魔
+      <div className="absolute bottom-4 text-xs text-stone-400 z-10 opacity-60 hover:opacity-100 transition-opacity cursor-default">
+        v1.0.1 • 猎人 vs 恶魔
       </div>
     </div>
   );

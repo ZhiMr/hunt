@@ -1,11 +1,10 @@
-
-import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter } from '../types';
+import { Entity, EntityType, GameState, InputState, Vector2, GamePhase, PlayerInput, Player, GameMessage, Hunter, Demon, DemonAIState } from '../types';
 import { 
   MAP_SIZE, MOVE_SPEED_HUNTER, MOVE_SPEED_DEMON, MOVE_SPEED_DEER, 
   SHOOT_COOLDOWN, BULLET_SPEED, DEMON_EAT_BONUS, MAX_BULLETS,
   DAY_DURATION_TICKS, SHOOT_PENALTY_SECONDS, DAY_DURATION_SECONDS,
   TREE_COLLISION_RATIO, FPS, CABIN_ENTER_DURATION, NIGHT_DURATION_SECONDS,
-  DEMON_STUN_DURATION, DEMON_TRACKING_DURATION
+  DEMON_STUN_DURATION, DEMON_TRACKING_DURATION, VISION_RADIUS_DAY, VISION_RADIUS_NIGHT
 } from '../constants';
 
 // --- Helper Math ---
@@ -14,6 +13,10 @@ export const normalize = (v: Vector2): Vector2 => {
   const len = Math.sqrt(v.x * v.x + v.y * v.y);
   return len === 0 ? { x: 0, y: 0 } : { x: v.x / len, y: v.y / len };
 };
+export const sub = (a: Vector2, b: Vector2): Vector2 => ({ x: a.x - b.x, y: a.y - b.y });
+export const add = (a: Vector2, b: Vector2): Vector2 => ({ x: a.x + b.x, y: a.y + b.y });
+export const scale = (v: Vector2, s: number): Vector2 => ({ x: v.x * s, y: v.y * s });
+export const dot = (a: Vector2, b: Vector2): number => a.x * b.x + a.y * b.y;
 
 // --- Interpolation Helpers ---
 export const lerp = (start: number, end: number, t: number) => {
@@ -175,8 +178,10 @@ export const hasLineOfSight = (p1: Vector2, p2: Vector2, obstacles: Entity[]): b
 export const calculateBotInput = (
   me: Player, 
   opponent: Player, 
-  mushrooms: Entity[], 
+  mushrooms: Entity[],
+  deers: Entity[], // Added deers for random target selection
   obstacles: Entity[], 
+  bushes: Entity[], 
   isNight: boolean,
   dt: number
 ): PlayerInput => {
@@ -190,184 +195,421 @@ export const calculateBotInput = (
   const myPos = me.pos;
   let moveDir = { x: 0, y: 0 };
   
-  // 1. Goal Seeking (DEMON)
+  // --- DEMON BOT ---
   if (me.type === EntityType.DEMON) {
-    // Demon Priority: Mushrooms > Survive
-    // Find closest mushroom
-    let closestMush: Entity | null = null;
-    let minDist = Infinity;
+    const demon = me as Demon;
+    // Cast/Initialize AI state
+    // We use 'as any' casting to attach flexible AI states to the generic Entity structure if not fully typed in all chains
+    if (!demon.aiState || !('mode' in demon.aiState && 'lastPatrolPoint' in demon.aiState)) {
+        demon.aiState = { 
+            mode: 'PATROL', 
+            targetPos: null, 
+            timer: 0,
+            lastPatrolPoint: null
+        } as DemonAIState;
+    }
+    const ai = demon.aiState as DemonAIState;
     
-    for (const mush of mushrooms) {
-      const d = distance(myPos, mush.pos);
-      if (d < minDist) {
-        minDist = d;
-        closestMush = mush;
-      }
-    }
-
-    if (closestMush) {
-       const toMush = normalize({ x: closestMush.pos.x - myPos.x, y: closestMush.pos.y - myPos.y });
-       moveDir.x += toMush.x * 2.0;
-       moveDir.y += toMush.y * 2.0;
-       
-       if (minDist < 10) input.action = true; // Eat
-    }
-
-    // Avoid Hunter if Day or if he is close
     const distToHunter = distance(myPos, opponent.pos);
-    if (!isNight || distToHunter < 150) {
-       const away = normalize({ x: myPos.x - opponent.pos.x, y: myPos.y - opponent.pos.y });
-       const fearFactor = 300 / (distToHunter + 10);
-       moveDir.x += away.x * fearFactor;
-       moveDir.y += away.y * fearFactor;
-    }
+    
+    // 1. NIGHT: Vision-Based Hunting
+    if (isNight) {
+        // -- Detection Logic --
+        let canSeeHunter = false;
+        
+        // A. Active Tracking Skill (Automatic knowledge)
+        if (demon.canTrack) {
+             input.action = true; // Use skill
+        }
+        if (demon.trackingActiveTime > 0) {
+            canSeeHunter = true; // Magic vision from skill
+        } else {
+            // B. Visual Detection
+            if (distToHunter < VISION_RADIUS_NIGHT) {
+                // Check if Hunter is inside a bush
+                let inBush = false;
+                for (const b of bushes) {
+                    if (distance(opponent.pos, b.pos) < b.size) {
+                        inBush = true;
+                        break;
+                    }
+                }
 
-  } else {
-    // --- HUNTER AI LOGIC ---
+                if (!inBush) {
+                    // Check Line of Sight (Trees/Cabin)
+                    if (hasLineOfSight(myPos, opponent.pos, obstacles)) {
+                        canSeeHunter = true;
+                    }
+                }
+            }
+        }
+
+        // -- State Machine --
+        if (canSeeHunter) {
+            ai.mode = 'CHASE';
+            ai.targetPos = opponent.pos;
+            ai.timer = 0;
+        } else if (ai.mode === 'CHASE') {
+            // Hunter lost -> Switch to Investigate
+            ai.mode = 'INVESTIGATE';
+            ai.timer = 2.0; // Spend 2 seconds checking the last known spot
+            // targetPos remains at last known location
+        } else if (ai.mode === 'INVESTIGATE') {
+            ai.timer -= dt;
+            if (ai.timer <= 0 || (ai.targetPos && distance(myPos, ai.targetPos) < 20)) {
+                ai.mode = 'PATROL';
+                ai.targetPos = null;
+            }
+        }
+
+        // -- Patrol Logic (Exploration) --
+        if (ai.mode === 'PATROL') {
+            if (!ai.targetPos || distance(myPos, ai.targetPos) < 20) {
+                // Pick a new target
+                // Heuristic: Generate 5 random points, pick the one furthest from current pos AND last patrol point
+                // This simulates "exploring new areas"
+                let bestCandidate = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
+                let maxScore = -1;
+
+                for(let i=0; i<5; i++) {
+                    const candidate = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
+                    const dCurrent = distance(myPos, candidate);
+                    const dLast = ai.lastPatrolPoint ? distance(ai.lastPatrolPoint, candidate) : 0;
+                    
+                    // Score = distance from me + distance from where I just was
+                    const score = dCurrent + (dLast * 0.5); 
+                    
+                    if (score > maxScore) {
+                        maxScore = score;
+                        bestCandidate = candidate;
+                    }
+                }
+                
+                ai.lastPatrolPoint = ai.targetPos ? { ...ai.targetPos } : { ...myPos };
+                ai.targetPos = bestCandidate;
+            }
+        }
+
+        // -- Movement Execution --
+        if (ai.targetPos) {
+            const toTarget = normalize(sub(ai.targetPos, myPos));
+            // Chase is faster, Patrol/Investigate slightly slower
+            const speedMod = ai.mode === 'CHASE' ? 1.5 : 1.2; 
+            moveDir = add(moveDir, scale(toTarget, speedMod));
+        }
+
+    } 
+    // 2. DAY: Disguise & Survival
+    else {
+        // Keep existing Day logic (Mimic Sheep behavior)
+        // PERCEPTION CHECK: Does Demon sense the Hunter?
+        let detectsHunter = false;
+        if (distToHunter < VISION_RADIUS_DAY) {
+            if (distToHunter < 100 || hasLineOfSight(myPos, opponent.pos, obstacles)) {
+                detectsHunter = true;
+            }
+        }
+
+        // Reuse the generic ai structure for day mimicking, but adapt properties
+        // We can temporarily use the same 'timer' field
+        if (detectsHunter) {
+            // MIMIC SHEEP: Stop/Go
+            ai.timer -= dt * FPS; // Use frame scaling for timer consistency with old logic
+            if (ai.timer <= 0) {
+                 // Toggle moving/not moving via a temp flag or just using timer duration
+                 // Let's use targetPos presence as "moving" state
+                 if (ai.targetPos) {
+                     // Was moving, now stop
+                     ai.targetPos = null;
+                     ai.timer = 60 + Math.random() * 240; // Stop for 1-4s
+                 } else {
+                     // Was stopped, now move
+                     // Pick random angle
+                     const angle = Math.random() * Math.PI * 2;
+                     // Set a target pos far away in that direction to simulate movement vector
+                     ai.targetPos = { x: myPos.x + Math.cos(angle) * 1000, y: myPos.y + Math.sin(angle) * 1000 };
+                     ai.timer = 60 + Math.random() * 120; // Move for 1-2s
+                 }
+            }
+            
+            if (ai.targetPos) {
+                const toTarget = normalize(sub(ai.targetPos, myPos));
+                moveDir = toTarget;
+            }
+        } else {
+             // FORAGE
+             let closestMush: Entity | null = null;
+             let minDist = Infinity;
+             for (const mush of mushrooms) {
+                 const d = distance(myPos, mush.pos);
+                 if (d < minDist) { minDist = d; closestMush = mush; }
+             }
+             if (closestMush) {
+                 const toMush = normalize(sub(closestMush.pos, myPos));
+                 moveDir = add(moveDir, scale(toMush, 1.5));
+                 if (minDist < 15) input.action = true; 
+             } else {
+                 // Wander if no mushrooms
+                 ai.timer -= dt * FPS;
+                 if (ai.timer <= 0) {
+                     if (ai.targetPos) { ai.targetPos = null; ai.timer = 60 + Math.random() * 120; }
+                     else {
+                         const angle = Math.random() * Math.PI * 2;
+                         ai.targetPos = { x: myPos.x + Math.cos(angle) * 1000, y: myPos.y + Math.sin(angle) * 1000 };
+                         ai.timer = 60 + Math.random() * 120;
+                     }
+                 }
+                 if (ai.targetPos) moveDir = normalize(sub(ai.targetPos, myPos));
+             }
+        }
+    }
+  } 
+  // --- HUNTER BOT ---
+  else {
     const hunter = me as unknown as Hunter;
-    // Initialize AI state if missing
     if (!hunter.aiState) {
-        hunter.aiState = { mode: 'IDLE', targetPos: null, waitTimer: 0 };
+        hunter.aiState = { 
+            mode: 'IDLE', 
+            targetPos: null, 
+            waitTimer: 0,
+            stuckTimer: 0,
+            lastPos: { x: myPos.x, y: myPos.y }
+        };
     }
     const ai = hunter.aiState;
 
     const distToDemon = distance(myPos, opponent.pos);
-    // Reduced detection range significantly (180 -> 50) to make it fairer
-    const canSeeDemon = isNight || distToDemon < 50; 
+    
+    // --- VISIBILITY CHECK ---
+    let canSeeDemon = false;
+    const visionRange = isNight ? VISION_RADIUS_NIGHT : VISION_RADIUS_DAY;
+
+    // 1. Distance Check
+    if (distToDemon < visionRange) {
+        // 2. Bush Check
+        let inBush = false;
+        for (const b of bushes) {
+            if (distance(opponent.pos, b.pos) < b.size) {
+                inBush = true;
+                break;
+            }
+        }
+        
+        // 3. Proximity & LOS
+        if (!inBush || distToDemon < 80) {
+             if (hasLineOfSight(myPos, opponent.pos, obstacles)) {
+                 canSeeDemon = true;
+             }
+        }
+    }
+
+    // --- DETECTION LOGIC (Witnessing the crime) ---
+    // The Hunter only "Knows" it's the demon if they see them eating a mushroom
+    // or if the demon attacks them at night (handled by range check below)
+    let witnessEating = false;
+    if (canSeeDemon) {
+        for (const m of mushrooms) {
+             // Interaction distance for eating is ~40
+             if (distance(opponent.pos, m.pos) < 40) {
+                 witnessEating = true;
+                 break;
+             }
+        }
+    }
+
+    // --- STUCK DETECTION ---
+    // Detect if Hunter is trying to move but stuck (e.g. against a tree)
+    // Only applies in moving states where targetPos is set
+    if ((ai.mode === 'PATROL' || ai.mode === 'RETURN_CABIN') && ai.targetPos) {
+        if (!ai.lastPos) ai.lastPos = { ...myPos };
+        
+        // If moved less than 5 pixels in this frame window (accumulated over updates)
+        // Since this runs every frame, we use a small timer check
+        // Ideally we compare against position X seconds ago, but here we check per frame accumulation
+        if (distance(myPos, ai.lastPos) < 5) {
+             ai.stuckTimer += dt;
+        } else {
+             ai.stuckTimer = 0;
+             ai.lastPos = { ...myPos };
+        }
+
+        if (ai.stuckTimer > 2.0) { // Stuck for 2 seconds
+             // Force retarget / Unstuck
+             ai.mode = 'IDLE';
+             ai.waitTimer = 0.5;
+             ai.targetPos = null;
+             ai.stuckTimer = 0;
+        }
+    } else {
+        // Reset if not moving
+        ai.stuckTimer = 0;
+        ai.lastPos = { ...myPos };
+    }
 
     // --- State Transitions ---
 
-    // 1. High Priority: Chase / Combat
-    if (canSeeDemon) {
-        ai.mode = 'CHASE';
-        ai.targetPos = { ...opponent.pos }; // Keep updating target to enemy pos
-    } 
-    // 2. High Priority: Night Survival (Return to Cabin)
-    else if (isNight && !hunter.inCabin) {
+    // 1. NIGHT SURVIVAL (Top Priority)
+    if (isNight && !hunter.inCabin) {
         ai.mode = 'RETURN_CABIN';
-        // Find Cabin Door
         const cabin = obstacles.find(o => o.type === EntityType.CABIN);
         if (cabin) {
             ai.targetPos = { x: cabin.pos.x, y: cabin.pos.y + cabin.size + 15 };
-        } else {
-            // Fallback
-            ai.targetPos = { x: MAP_SIZE/2, y: MAP_SIZE/2 };
         }
     }
-    // 3. Patrol Logic (Default)
+    // 2. CHASE (Only If Witnessed Eating)
+    else if (witnessEating && !isNight) {
+        ai.mode = 'CHASE';
+        // Lock on to current pos
+        ai.targetPos = opponent.pos;
+    }
+    // 3. CONTINUE CHASE (If previously locked and still visible)
+    else if (ai.mode === 'CHASE' && !isNight) {
+        // OMNISCIENT TRACKING in Chase mode
+        // Directly update target to opponent position without prediction
+        // This ensures the bot runs directly AT the player, solving "mimicking" feel of prediction
+        ai.targetPos = opponent.pos;
+    }
+    // 4. PATROL (Default)
     else {
-        // If we were chasing/returning and now safe/lost sight, switch to IDLE briefly
+        // Reset from Chase/Return
         if (ai.mode === 'CHASE' || ai.mode === 'RETURN_CABIN') {
              ai.mode = 'IDLE';
-             ai.waitTimer = 1.0;
+             ai.waitTimer = 0.5;
              ai.targetPos = null;
         }
 
         if (ai.mode === 'IDLE') {
             ai.waitTimer -= dt;
             if (ai.waitTimer <= 0) {
-                // Pick new target
                 ai.mode = 'PATROL';
+                // Check Mushrooms (70% chance)
+                let picked = false;
+                if (mushrooms.length > 0 && Math.random() < 0.7) {
+                    // Try to pick a mushroom that is not immediately next to us
+                    const validMushrooms = mushrooms.filter(m => distance(myPos, m.pos) > 100);
+                    if (validMushrooms.length > 0) {
+                        const rnd = validMushrooms[Math.floor(Math.random() * validMushrooms.length)];
+                        ai.targetPos = { ...rnd.pos };
+                        picked = true;
+                    }
+                }
                 
-                // Pick a random mushroom as target
-                if (mushrooms.length > 0) {
-                    const rnd = mushrooms[Math.floor(Math.random() * mushrooms.length)];
-                    ai.targetPos = { ...rnd.pos };
-                } else {
-                    // Wander randomly if no mushrooms
-                     ai.targetPos = { 
-                         x: Math.random() * MAP_SIZE, 
-                         y: Math.random() * MAP_SIZE 
-                     };
+                if (!picked) {
+                     // Pick a random patrol point
+                     let attempts = 0;
+                     while(attempts < 10) {
+                        const tx = Math.random() * MAP_SIZE;
+                        const ty = Math.random() * MAP_SIZE;
+                        const target = { x: tx, y: ty };
+                        
+                        // Ensure minimum travel distance of 300px to prevent staying in one area
+                        if (distance(myPos, target) > 300) {
+                            ai.targetPos = target;
+                            picked = true;
+                            break;
+                        }
+                        attempts++;
+                     }
+                     // Fallback
+                     if (!picked) ai.targetPos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
                 }
             }
         }
         
         if (ai.mode === 'PATROL') {
-            // Check if reached target
             if (ai.targetPos && distance(myPos, ai.targetPos) < 20) {
-                // Arrived
                 ai.mode = 'IDLE';
-                ai.waitTimer = 1.0 + Math.random() * 1.5; // Wait 1-2.5s
+                ai.waitTimer = 0.5 + Math.random() * 1.0; // Reduced wait time (0.5s - 1.5s)
                 ai.targetPos = null;
             }
         }
     }
 
-    // --- Execution (Movement) ---
+    // --- Execution ---
     
-    // Combat Action (Shooting)
-    if (ai.mode === 'CHASE') {
-        const toDemon = normalize({ x: opponent.pos.x - myPos.x, y: opponent.pos.y - myPos.y });
-        moveDir.x += toDemon.x * 1.5;
-        moveDir.y += toDemon.y * 1.5;
+    if (ai.targetPos) {
+        const toTarget = normalize(sub(ai.targetPos, myPos));
+        let speedMod = 0.8;
+        if (ai.mode === 'CHASE') speedMod = 1.0;
+        if (ai.mode === 'RETURN_CABIN') speedMod = 2.5;
 
-        const range = 50; 
-        if (distToDemon < range && me.cooldown <= 0) {
-            const myAngle = Math.atan2(moveDir.y, moveDir.x);
-            const angleToDemon = Math.atan2(toDemon.y, toDemon.x);
-            let angleDiff = Math.abs(myAngle - angleToDemon);
-            if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+        moveDir = add(moveDir, scale(toTarget, speedMod));
 
-            if (angleDiff < 0.5 && Math.random() < 0.02) {
-                input.action = true;
-            }
+        // CHASE specific: Shoot Logic
+        if (ai.mode === 'CHASE') {
+             // REMOVED: Back away logic. Now aggressively chases to ensure facing direction.
+             
+             // Shoot if in range (blind fire if chasing, as targetPos is locked)
+             if (me.cooldown <= 0) {
+                // Ensure we are somewhat aligned with target before firing to avoid shooting backward
+                const targetAngle = Math.atan2(toTarget.y, toTarget.x);
+                const myAngle = me.angle;
+                let angleDiff = Math.abs(myAngle - targetAngle);
+                if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+                
+                if (angleDiff < 0.4) input.action = true;
+             }
         }
-    } 
-    else if (ai.targetPos) {
-        // Move towards target (Patrol or Cabin)
-        const toTarget = normalize({ x: ai.targetPos.x - myPos.x, y: ai.targetPos.y - myPos.y });
         
-        // Speed modulation: Run to cabin, walk on patrol
-        const speedMod = ai.mode === 'RETURN_CABIN' ? 3.0 : 0.8;
-        
-        moveDir.x += toTarget.x * speedMod;
-        moveDir.y += toTarget.y * speedMod;
-
-        // Cabin Entry micro-adjustment
-        if (ai.mode === 'RETURN_CABIN' && distance(myPos, ai.targetPos) < 20) {
-            moveDir = { x: 0, y: 0 }; // Stop to enter
+        if (ai.mode === 'RETURN_CABIN' && distance(myPos, ai.targetPos) < 10) {
+            moveDir = { x: 0, y: 0 };
         }
+    }
+
+    // --- PARANOIA: Randomly shoot at sheep/demon if patroling ---
+    // Only if NOT chasing and NOT night and NOT returning to cabin
+    if (ai.mode !== 'CHASE' && ai.mode !== 'RETURN_CABIN' && !isNight && me.cooldown <= 0) {
+         // Low probability to shoot (e.g. 0.1% per frame, lowered from 0.5%)
+         if (Math.random() < 0.001) {
+             const potentialTargets = [...deers];
+             if (canSeeDemon) potentialTargets.push(opponent);
+             
+             // Filter visible targets
+             const visibleTargets = potentialTargets.filter(t => {
+                 const d = distance(myPos, t.pos);
+                 if (d > visionRange) return false;
+                 // Don't shoot into bushes blindly unless very close
+                 let inBush = false;
+                 for (const b of bushes) { if (distance(t.pos, b.pos) < b.size) { inBush = true; break; } }
+                 if (inBush && d > 80) return false;
+                 
+                 return hasLineOfSight(myPos, t.pos, obstacles);
+             });
+
+             if (visibleTargets.length > 0) {
+                 const victim = visibleTargets[Math.floor(Math.random() * visibleTargets.length)];
+                 const dx = victim.pos.x - myPos.x;
+                 const dy = victim.pos.y - myPos.y;
+                 const toVictim = normalize({x: dx, y: dy});
+                 
+                 // Override movement for this frame to face target (since angle depends on moveDir)
+                 moveDir = toVictim; 
+                 input.action = true; 
+             }
+         }
     }
   }
 
-  // 2. Obstacle Avoidance (Repulsion & Slide)
+  // 3. Obstacle Avoidance (Weighted)
   for (const obs of obstacles) {
-    if (obs.type === EntityType.BUSH) continue; // Don't avoid bushes
+    if (obs.type === EntityType.BUSH) continue; 
 
     const dist = distance(myPos, obs.pos);
-    const avoidRadius = obs.size + 40; 
+    const avoidRadius = obs.size + 30; 
     
     if (dist < avoidRadius) {
-       const toObs = { x: obs.pos.x - myPos.x, y: obs.pos.y - myPos.y };
-       const away = normalize({ x: -toObs.x, y: -toObs.y });
-       
-       const weight = ((avoidRadius - dist) / avoidRadius) * 12.0; 
-       moveDir.x += away.x * weight;
-       moveDir.y += away.y * weight;
-
-       if (dist < avoidRadius * 0.9) {
-           const dot = moveDir.x * toObs.x + moveDir.y * toObs.y;
-           if (dot > -0.5) { 
-               let slide = { x: -away.y, y: away.x };
-               const cross = moveDir.x * away.y - moveDir.y * away.x;
-               if (cross < 0) {
-                   slide = { x: away.y, y: -away.x }; 
-               }
-               const slideWeight = 6.0;
-               moveDir.x += slide.x * slideWeight;
-               moveDir.y += slide.y * slideWeight;
-           }
-       }
+       const toObs = sub(obs.pos, myPos);
+       const away = normalize(scale(toObs, -1));
+       const weight = ((avoidRadius - dist) / avoidRadius) * 8.0; 
+       moveDir = add(moveDir, scale(away, weight));
     }
   }
 
-  // 3. Convert Vector to Input
+  // 4. Convert Vector to Input
   if (moveDir.x * moveDir.x + moveDir.y * moveDir.y > 0.1) {
     if (Math.abs(moveDir.x) > Math.abs(moveDir.y)) {
        if (moveDir.x > 0.1) input.right = true;
        else if (moveDir.x < -0.1) input.left = true;
-       // Allow diagonal if strong enough
        if (moveDir.y > 0.5) input.down = true;
        else if (moveDir.y < -0.5) input.up = true;
     } else {
@@ -381,333 +623,302 @@ export const calculateBotInput = (
   return input;
 };
 
-// --- State Update ---
+// --- Main Game Update Loop ---
 export const updateGame = (state: GameState, hunterInput: PlayerInput, demonInput: PlayerInput, dt: number): GameState => {
-  if (state.phase !== GamePhase.PLAYING) return state;
+  let newState = {
+    ...state,
+    hunter: { ...state.hunter },
+    demon: { ...state.demon },
+    // Shallow copy arrays to allow modification
+    bullets: [...state.bullets],
+    deers: [...state.deers],
+    mushrooms: [...state.mushrooms],
+    messages: [...state.messages],
+    bushes: [...state.bushes]
+  };
 
-  const newState = { ...state };
-  // Deep clone mutable entities to ensure React updates detect changes
-  newState.hunter = { ...state.hunter, pos: { ...state.hunter.pos } };
-  newState.demon = { ...state.demon, pos: { ...state.demon.pos } };
-  
-  // Update Message Timers
-  newState.messages = newState.messages
-      .map(m => ({ ...m, timeLeft: m.timeLeft - dt }))
-      .filter(m => m.timeLeft > 0);
+  const obstacles = [...state.trees, state.cabin];
 
-  const obstacles = [...state.trees, state.cabin]; // Bushes excluded from collision obstacles
-
-  // Scale factor for frame-based logic (defaults were tuned for 60fps)
-  const frameScale = dt * FPS;
-
-  // Update Demon Tracking Timer
-  if (newState.demon.trackingActiveTime > 0) {
-      newState.demon.trackingActiveTime -= dt;
+  // --- 1. Time & Phase ---
+  if (newState.phase === GamePhase.GAME_OVER_HUNTER_WINS || newState.phase === GamePhase.GAME_OVER_DEMON_WINS) {
+      return newState;
   }
 
-  // 1. Time Progression
-  if (!newState.isNight) {
-    // Use real time seconds
-    newState.timeOfDay += dt / DAY_DURATION_SECONDS;
-    if (newState.timeOfDay >= 1) {
-      newState.isNight = true;
-      newState.timeOfDay = 1;
-      newState.nightTimer = 0; // Initialize night timer
-      newState.demon.canTrack = true; // Enable tracking for the night
-      newState.messages = addMessage(newState.messages, "夜晚降临。快回到木屋躲避恶魔！");
-    }
-  } else {
-    // Night Logic
-    newState.nightTimer += dt;
-    if (newState.nightTimer >= NIGHT_DURATION_SECONDS) {
-        // Reset to Day
-        newState.isNight = false;
-        newState.timeOfDay = 0;
-        newState.nightTimer = 0;
-        newState.hunter.inCabin = false; // Kick out hunter
-        newState.hunter.enterTimer = 0;
-        newState.demon.stunTimer = 0; // Reset stun
-        newState.demon.canTrack = false; // Reset tracking
-        newState.messages = addMessage(newState.messages, "黎明到来，恶魔重新潜伏，蘑菇已刷新。");
-        
-        // Respawn Mushrooms (Scattered)
-        const newMushrooms: Entity[] = [];
-        const MIN_MUSHROOM_DIST = 100;
-        // Include bushes for spawning checks
-        const spawnObstacles = [...obstacles, ...newState.bushes];
+  // Messages TTL
+  newState.messages = newState.messages.filter(m => {
+      m.timeLeft -= dt;
+      return m.timeLeft > 0;
+  });
 
-        for (let i = 0; i < 10; i++) {
-           let pos = { x: 0, y: 0 };
-           let valid = false;
-           let attempts = 0;
+  // Day/Night Cycle
+  if (newState.isNight) {
+      newState.nightTimer += dt;
+      if (newState.nightTimer >= NIGHT_DURATION_SECONDS) {
+          // Loop Day Logic
+          newState.isNight = false;
+          newState.nightTimer = 0;
+          newState.timeOfDay = 0;
+          newState.hunter.inCabin = false; // Kick out
+          newState.demon.isRevealed = false;
+          newState.demon.canTrack = false;
+          newState.messages = addMessage(newState.messages, "黎明到来，新的一天...");
 
-           while(!valid && attempts < 20) {
+          // Respawn Mushrooms (Fill up to 10)
+          let attempts = 0;
+          // Note: using state.bushes is safe here as obstacles includes logic for them in spawn check if we pass includeBushes=true
+          while (newState.mushrooms.length < 10 && attempts < 50) {
              attempts++;
-             pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
-             
-             // Check collisions with obstacles including bushes
-             if (checkCollision(pos, 10, spawnObstacles, true)) continue;
-             
-             // Check distance from other new mushrooms to ensure scatter
-             let tooClose = false;
-             for (const other of newMushrooms) {
-                 if (distance(pos, other.pos) < MIN_MUSHROOM_DIST) {
-                     tooClose = true;
-                     break;
+             const pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
+             // Use obstacles + bushes for collision check to avoid spawning inside them
+             if (!checkCollision(pos, 10, obstacles, true)) {
+                 const tooClose = newState.mushrooms.some(m => distance(m.pos, pos) < 50);
+                 if (!tooClose) {
+                     newState.mushrooms.push({ 
+                        id: `mush-respawn-${Date.now()}-${newState.mushrooms.length}`, 
+                        type: EntityType.MUSHROOM, 
+                        pos, 
+                        size: 8, 
+                        angle: 0 
+                     });
                  }
              }
-             if (!tooClose) valid = true;
-           }
+          }
 
-           newMushrooms.push({
-             id: `mush-respawn-${Date.now()}-${i}`,
-             type: EntityType.MUSHROOM,
-             pos,
-             size: 8,
-             angle: 0
-           });
-        }
-        newState.mushrooms = newMushrooms;
-    }
-  }
-
-  // 1.5 Cabin Logic
-  if (newState.isNight && !newState.hunter.inCabin) {
-     const doorPos = { 
-         x: newState.cabin.pos.x, 
-         y: newState.cabin.pos.y + newState.cabin.size + 5 // Door is at bottom edge
-     };
-     const distToDoor = distance(newState.hunter.pos, doorPos);
-     
-     // Specific requirement: Radius 30 for both enter and exit
-     const INTERACTION_RADIUS = 30;
-     
-     if (distToDoor < INTERACTION_RADIUS) { 
-         newState.hunter.enterTimer += dt;
-         if (newState.hunter.enterTimer >= CABIN_ENTER_DURATION) {
-             newState.hunter.inCabin = true;
-             newState.messages = addMessage(newState.messages, "猎人躲进了木屋，暂时安全了！");
-         }
-     } else {
-         // Immediate reset when leaving range
-         newState.hunter.enterTimer = 0;
-     }
-  } else if (!newState.isNight) {
-      // Reset timer if day
-      newState.hunter.enterTimer = 0;
-  }
-
-  // 2. Hunter Movement (WASD / Input)
-  if (!newState.hunter.inCabin) { // Can only move if not in cabin
-    let moveH = { x: 0, y: 0 };
-    if (hunterInput.up) moveH.y -= 1;
-    if (hunterInput.down) moveH.y += 1;
-    if (hunterInput.left) moveH.x -= 1;
-    if (hunterInput.right) moveH.x += 1;
-    
-    if (moveH.x !== 0 || moveH.y !== 0) {
-        moveH = normalize(moveH);
-        const currentPos = { ...newState.hunter.pos };
-        const speed = MOVE_SPEED_HUNTER * frameScale;
-
-        // Try Move X
-        const nextPosX = { x: currentPos.x + moveH.x * speed, y: currentPos.y };
-        if (!checkCollision(nextPosX, newState.hunter.size, obstacles)) {
-        newState.hunter.pos.x = nextPosX.x;
-        }
-        // Try Move Y (from potentially new X)
-        const nextPosY = { x: newState.hunter.pos.x, y: currentPos.y + moveH.y * speed };
-        if (!checkCollision(nextPosY, newState.hunter.size, obstacles)) {
-        newState.hunter.pos.y = nextPosY.y;
-        }
-        // Update angle based on movement if moving
-        newState.hunter.angle = Math.atan2(moveH.y, moveH.x);
-    }
-  }
-
-  // 3. Demon Movement (Arrows / Input)
-  if (newState.demon.stunTimer > 0) {
-      // STUNNED Logic
-      newState.demon.stunTimer -= dt;
-      if (newState.demon.stunTimer < 0) newState.demon.stunTimer = 0;
-  } else {
-      let moveD = { x: 0, y: 0 };
-      if (demonInput.up) moveD.y -= 1;
-      if (demonInput.down) moveD.y += 1;
-      if (demonInput.left) moveD.x -= 1;
-      if (demonInput.right) moveD.x += 1;
-
-      if (moveD.x !== 0 || moveD.y !== 0) {
-        moveD = normalize(moveD);
-        const baseSpeed = newState.isNight ? MOVE_SPEED_DEMON * 1.5 : MOVE_SPEED_DEER;
-        const speed = baseSpeed * frameScale;
-        
-        const currentPos = { ...newState.demon.pos };
-        
-        // Try Move X
-        const nextPosX = { x: currentPos.x + moveD.x * speed, y: currentPos.y };
-        if (!checkCollision(nextPosX, newState.demon.size, obstacles)) {
-          newState.demon.pos.x = nextPosX.x;
-        }
-        // Try Move Y
-        const nextPosY = { x: newState.demon.pos.x, y: currentPos.y + moveD.y * speed };
-        if (!checkCollision(nextPosY, newState.demon.size, obstacles)) {
-          newState.demon.pos.y = nextPosY.y;
-        }
-        newState.demon.angle = Math.atan2(moveD.y, moveD.x);
+          // Respawn Deer (Fill up to 25)
+          attempts = 0;
+          while (newState.deers.length < 25 && attempts < 50) {
+             attempts++;
+             const pos = { x: Math.random() * MAP_SIZE, y: Math.random() * MAP_SIZE };
+             if (!checkCollision(pos, 15, obstacles)) {
+                 newState.deers.push({
+                  id: `deer-respawn-${Date.now()}-${newState.deers.length}`,
+                  type: EntityType.DEER,
+                  pos,
+                  size: 12,
+                  angle: Math.random() * Math.PI * 2,
+                  aiState: { moving: Math.random() > 0.5, timer: 60 }
+                });
+             }
+          }
       }
-  }
-
-  // 4. Hunter Actions (Shooting)
-  if (newState.hunter.cooldown > 0) newState.hunter.cooldown -= frameScale;
-  
-  if (hunterInput.action && newState.hunter.cooldown <= 0 && !newState.hunter.inCabin) {
-    // Shoot in facing direction
-    const angle = newState.hunter.angle;
-    const velocity = { x: Math.cos(angle) * BULLET_SPEED, y: Math.sin(angle) * BULLET_SPEED };
-    newState.bullets.push({
-      pos: { ...newState.hunter.pos },
-      velocity,
-      active: true
-    });
-    
-    // Apply penalty
-    if (!newState.isNight) {
-      const penaltyPercent = SHOOT_PENALTY_SECONDS / DAY_DURATION_SECONDS;
-      newState.timeOfDay = Math.min(1, newState.timeOfDay + penaltyPercent);
-      if (newState.timeOfDay >= 1 && !newState.isNight) {
+  } else {
+      newState.timeOfDay += dt / DAY_DURATION_SECONDS;
+      if (newState.timeOfDay >= 1.0) {
           newState.isNight = true;
           newState.nightTimer = 0;
-          newState.demon.canTrack = true; // Enable tracking
-          newState.messages = addMessage(newState.messages, "枪声加速了夜幕降临！");
+          newState.hunter.inCabin = false; 
+          newState.messages = addMessage(newState.messages, "夜幕降临...");
+          
+          newState.demon.isRevealed = true;
+          newState.demon.canTrack = true;
       }
-    }
-    newState.hunter.cooldown = SHOOT_COOLDOWN;
   }
 
-  // 5. Demon Actions (Eat Mushroom & Tracking)
-  if (demonInput.action && newState.demon.stunTimer <= 0) {
-    let actionUsed = false;
+  // --- 2. Hunter ---
+  // Movement
+  if (!newState.hunter.inCabin) {
+      let hMove = { x: 0, y: 0 };
+      if (hunterInput.up) hMove.y -= 1;
+      if (hunterInput.down) hMove.y += 1;
+      if (hunterInput.left) hMove.x -= 1;
+      if (hunterInput.right) hMove.x += 1;
 
-    // Tracking (Priority at Night)
-    if (newState.isNight && newState.demon.canTrack) {
-        newState.demon.canTrack = false;
-        newState.demon.trackingActiveTime = DEMON_TRACKING_DURATION;
-        newState.messages = addMessage(newState.messages, "恶魔感知到了猎人的方位！");
-        actionUsed = true;
-    }
+      if (hMove.x !== 0 || hMove.y !== 0) {
+          hMove = normalize(hMove);
+          const moveDist = MOVE_SPEED_HUNTER * dt * FPS; 
+          const nextPos = add(newState.hunter.pos, scale(hMove, moveDist));
+          
+          newState.hunter.angle = Math.atan2(hMove.y, hMove.x);
 
-    if (!actionUsed) {
-        // Eating Mushroom
-        const eatRange = 40;
-        const mushroomIndex = newState.mushrooms.findIndex(m => distance(m.pos, newState.demon.pos) < eatRange);
-        if (mushroomIndex !== -1) {
-          newState.mushrooms.splice(mushroomIndex, 1);
-          if (!newState.isNight) {
-             newState.timeOfDay += DEMON_EAT_BONUS;
-             newState.messages = addMessage(newState.messages, "咔嚓！好像有蘑菇被吃掉了...");
+          if (!checkCollision(nextPos, newState.hunter.size, obstacles)) {
+              newState.hunter.pos = nextPos;
+          } else {
+              // Sliding
+               if (!checkCollision({x: nextPos.x, y: newState.hunter.pos.y}, newState.hunter.size, obstacles)) {
+                   newState.hunter.pos.x = nextPos.x;
+              } else if (!checkCollision({x: newState.hunter.pos.x, y: nextPos.y}, newState.hunter.size, obstacles)) {
+                   newState.hunter.pos.y = nextPos.y;
+              }
           }
-        }
-    }
+      }
   }
 
-  // 6. Projectiles Physics & Collision
-  newState.bullets = newState.bullets.map(b => ({
-    ...b,
-    pos: { x: b.pos.x + b.velocity.x * frameScale, y: b.pos.y + b.velocity.y * frameScale }
-  })).filter(b => {
-    // Out of bounds
-    if (b.pos.x < 0 || b.pos.x > MAP_SIZE || b.pos.y < 0 || b.pos.y > MAP_SIZE) return false;
-    
-    // Hit Tree/Cabin
-    for (const obs of obstacles) {
-      if (obs.type === EntityType.TREE) {
-        const halfSize = obs.size * TREE_COLLISION_RATIO;
-        if (Math.abs(b.pos.x - obs.pos.x) < halfSize && 
-            Math.abs(b.pos.y - obs.pos.y) < halfSize) {
-          return false;
-        }
-      } else {
-        if (distance(b.pos, obs.pos) < obs.size) return false;
+  // Cabin Entry
+  const distCabin = distance(newState.hunter.pos, newState.cabin.pos);
+  const isHunterMoving = (hunterInput.up || hunterInput.down || hunterInput.left || hunterInput.right);
+  
+  // FIX: Allow entry even if moving slightly, as long as within range
+  // Only enter if Night (was Day)
+  if (newState.isNight && distCabin < newState.cabin.size + 40 && !newState.hunter.inCabin) {
+      newState.hunter.enterTimer += dt;
+      if (newState.hunter.enterTimer >= CABIN_ENTER_DURATION) {
+          newState.hunter.inCabin = true;
+          newState.hunter.enterTimer = 0;
+          newState.messages = addMessage(newState.messages, "猎人已躲入木屋。");
       }
-    }
-
-    // Hit Demon
-    if (distance(b.pos, newState.demon.pos) < newState.demon.size + 10) {
-      if (newState.isNight) {
-          // Night logic: Stun instead of kill
-          newState.demon.stunTimer = DEMON_STUN_DURATION;
-          newState.messages = addMessage(newState.messages, "恶魔被击晕了！");
-          return false; // Remove bullet
-      } else {
-          // Day logic: Hunter Wins
-          newState.phase = GamePhase.GAME_OVER_HUNTER_WINS;
-          return false;
-      }
-    }
-    return true;
-  });
-
-  // 7. Check Game Over
-  if (newState.isNight && !newState.hunter.inCabin) {
-    if (distance(newState.hunter.pos, newState.demon.pos) < 30 && newState.demon.stunTimer <= 0) {
-      newState.phase = GamePhase.GAME_OVER_DEMON_WINS;
-    }
+  } else {
+      newState.hunter.enterTimer = Math.max(0, newState.hunter.enterTimer - dt * 2);
   }
 
-  // 8. AI Deer wandering
+  // Shooting
+  if (newState.hunter.cooldown > 0) newState.hunter.cooldown -= dt * FPS;
+  
+  if (hunterInput.action && newState.hunter.cooldown <= 0 && !newState.hunter.inCabin) {
+      newState.hunter.cooldown = SHOOT_COOLDOWN;
+      const angle = newState.hunter.angle;
+      const dir = { x: Math.cos(angle), y: Math.sin(angle) };
+      const startPos = add(newState.hunter.pos, scale(dir, newState.hunter.size + 5));
+      const velocity = scale(dir, BULLET_SPEED);
+      
+      newState.bullets.push({ pos: startPos, velocity, active: true });
+
+      if (!newState.isNight) {
+           const penalty = SHOOT_PENALTY_SECONDS / DAY_DURATION_SECONDS;
+           // FIX: Allow time to hit 1.0 immediately for instant transition
+           newState.timeOfDay = Math.min(1.0, newState.timeOfDay + penalty);
+           newState.messages = addMessage(newState.messages, "开枪惩罚: 时间流逝");
+      }
+  }
+
+  // --- 3. Demon ---
+  if (newState.demon.stunTimer > 0) {
+      newState.demon.stunTimer -= dt;
+  } else {
+      let dMove = { x: 0, y: 0 };
+      if (demonInput.up) dMove.y -= 1;
+      if (demonInput.down) dMove.y += 1;
+      if (demonInput.left) dMove.x -= 1;
+      if (demonInput.right) dMove.x += 1;
+
+      if (dMove.x !== 0 || dMove.y !== 0) {
+          dMove = normalize(dMove);
+          
+          // SPEED UPDATE: Day = Deer Speed, Night = Demon Speed * 1.3
+          const currentSpeed = newState.isNight ? (MOVE_SPEED_DEMON * 1.3) : MOVE_SPEED_DEER;
+          const moveDist = currentSpeed * dt * FPS;
+          
+          const nextPos = add(newState.demon.pos, scale(dMove, moveDist));
+          newState.demon.angle = Math.atan2(dMove.y, dMove.x);
+
+          if (!checkCollision(nextPos, newState.demon.size, obstacles)) {
+              newState.demon.pos = nextPos;
+          } else {
+              if (!checkCollision({x: nextPos.x, y: newState.demon.pos.y}, newState.demon.size, obstacles)) {
+                   newState.demon.pos.x = nextPos.x;
+              } else if (!checkCollision({x: newState.demon.pos.x, y: nextPos.y}, newState.demon.size, obstacles)) {
+                   newState.demon.pos.y = nextPos.y;
+              }
+          }
+      }
+  }
+
+  // Demon Skills
+  if (newState.isNight) {
+      if (newState.demon.trackingActiveTime > 0) newState.demon.trackingActiveTime -= dt;
+      // Prevent accidental trigger right after transition (e.g. holding key from eating)
+      if (demonInput.action && newState.demon.canTrack && newState.nightTimer > 0.5) {
+          newState.demon.canTrack = false;
+          newState.demon.trackingActiveTime = DEMON_TRACKING_DURATION;
+          newState.messages = addMessage(newState.messages, "恶魔正在感知...");
+      }
+
+      // Attack
+      if (!newState.hunter.inCabin && newState.demon.stunTimer <= 0) {
+          if (distance(newState.demon.pos, newState.hunter.pos) < (newState.demon.size + newState.hunter.size)) {
+              newState.phase = GamePhase.GAME_OVER_DEMON_WINS;
+              newState.messages = addMessage(newState.messages, "猎人被恶魔捕获！");
+          }
+      }
+  } else {
+      // Eat Mushroom (Require Interaction)
+      if (demonInput.action) {
+          const eatRange = 20;
+          let ate = false;
+          const initialCount = newState.mushrooms.length;
+          newState.mushrooms = newState.mushrooms.filter(m => {
+              if (ate) return true; // Already ate one this frame
+              if (distance(newState.demon.pos, m.pos) < eatRange) {
+                 ate = true;
+                 return false;
+              }
+              return true;
+          });
+
+          if (newState.mushrooms.length < initialCount) {
+              const bonus = DEMON_EAT_BONUS;
+              // Allow time to hit 1.0 so night triggers immediately next frame
+              newState.timeOfDay = Math.min(1.0, newState.timeOfDay + bonus);
+              newState.messages = addMessage(newState.messages, "恶魔吞噬了蘑菇");
+          }
+      }
+  }
+
+  // --- 4. Deer ---
   newState.deers = newState.deers.map(deer => {
-    const ai = (deer.aiState as any) || { moving: false, timer: 0 };
-    let newAi = { ...ai };
-    newAi.timer -= frameScale;
-
-    if (newAi.timer <= 0) {
-      newAi.moving = !newAi.moving;
-      if (newAi.moving) {
-        // Start Moving
-        // Range: 2s to 5s (approx 120 to 300 frames)
-        newAi.timer = Math.floor(Math.random() * 180) + 120;
-        
-        // 8-way direction: 0 to 7 * PI/4
-        const dirIndex = Math.floor(Math.random() * 8);
-        deer.angle = dirIndex * (Math.PI / 4);
-      } else {
-        // Start Idle
-        // Range: 1s to 10s (60 to 600 frames)
-        newAi.timer = Math.floor(Math.random() * 540) + 60;
-        
-        // Chance to change facing direction immediately upon stopping (50% chance)
-        if (Math.random() < 0.5) {
-             const turn = Math.random() < 0.5 ? 1 : -1;
-             deer.angle += turn * (Math.PI / 4);
-        }
+      // Copy deer
+      const d = { ...deer, aiState: { ...deer.aiState } as any };
+      
+      d.aiState.timer -= dt * FPS;
+      if (d.aiState.timer <= 0) {
+          d.aiState.moving = !d.aiState.moving;
+          d.aiState.timer = 60 + Math.random() * 120;
+          if (d.aiState.moving) d.angle = Math.random() * Math.PI * 2;
       }
-    }
 
-    let nextPos = deer.pos;
-    if (newAi.moving) {
-       // Chance to change direction while moving
-       if (Math.random() < 0.01) {
-           // Turn 45 degrees left or right
-           const turn = Math.random() < 0.5 ? 1 : -1;
-           deer.angle += turn * (Math.PI / 4);
-       }
-
-       const speed = MOVE_SPEED_DEER * frameScale;
-       nextPos = {
-         x: deer.pos.x + Math.cos(deer.angle) * speed,
-         y: deer.pos.y + Math.sin(deer.angle) * speed
-       };
-       if (checkCollision(nextPos, deer.size, obstacles)) {
-         newAi.moving = false;
-         newAi.timer = 60; 
-         deer.angle += Math.PI; // Turn back
-         nextPos = deer.pos;
-       }
-    } 
-    
-    return { ...deer, pos: nextPos, aiState: newAi };
+      if (d.aiState.moving) {
+          const moveDist = MOVE_SPEED_DEER * dt * FPS;
+          const dir = { x: Math.cos(d.angle), y: Math.sin(d.angle) };
+          const nextPos = add(d.pos, scale(dir, moveDist));
+          
+          if (!checkCollision(nextPos, d.size, obstacles)) {
+              d.pos = nextPos;
+          } else {
+              d.angle += Math.PI; // Bounce
+          }
+      }
+      return d;
   });
+
+  // --- 5. Bullets ---
+  const deadDeerIds = new Set<string>();
+  
+  newState.bullets = newState.bullets.map(b => {
+      const move = scale(b.velocity, dt * FPS);
+      const nextPos = add(b.pos, move);
+      
+      if (nextPos.x < 0 || nextPos.x > MAP_SIZE || nextPos.y < 0 || nextPos.y > MAP_SIZE) {
+          return { ...b, active: false };
+      }
+
+      if (checkCollision(nextPos, 2, obstacles)) return { ...b, active: false };
+
+      // Hit Demon
+      if (distance(nextPos, newState.demon.pos) < newState.demon.size + 5) {
+           if (newState.isNight) {
+               newState.demon.stunTimer = DEMON_STUN_DURATION;
+               newState.messages = addMessage(newState.messages, "恶魔被击晕！");
+           } else {
+               newState.phase = GamePhase.GAME_OVER_HUNTER_WINS;
+               newState.demon.isRevealed = true;
+               newState.messages = addMessage(newState.messages, "恶魔被击杀！");
+           }
+           return { ...b, active: false };
+      }
+
+      // Hit Deer
+      for (const deer of newState.deers) {
+          if (distance(nextPos, deer.pos) < deer.size + 5) {
+              deadDeerIds.add(deer.id);
+              return { ...b, active: false };
+          }
+      }
+      
+      return { ...b, pos: nextPos };
+  }).filter(b => b.active);
+
+  if (deadDeerIds.size > 0) {
+      newState.deers = newState.deers.filter(d => !deadDeerIds.has(d.id));
+  }
 
   return newState;
 };
