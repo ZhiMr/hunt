@@ -865,7 +865,7 @@ const App: React.FC = () => {
                         onStart={startGame}
                         onSetRole={(role) => {
                             setMyRole(role);
-                            if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' : 'WAITING');
+                            if (gameMode === GameMode.SINGLE_PLAYER) setOpponentMode(opponentMode === 'COMPUTER' ? 'COMPUTER' : 'WAITING');
                         }}
                         onSetOpponentMode={setOpponentMode}
                     />
